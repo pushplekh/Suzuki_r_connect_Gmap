@@ -59,10 +59,10 @@ class IdleClockGeneratorTest {
     }
 
     @Test
-    fun `frame has generic arrow and good status flags`() {
+    fun `frame has no maneuver and good status flags`() {
         val frame = IdleClockGenerator(clock = { LocalTime.of(10, 30) })
             .build(suzukiWeatherCode = 1, tempCelsius = 22.0)
-        assertEquals(ManeuverMap.DEFAULT_CLUSTER_BYTE, frame.maneuverId)
+        assertEquals(ManeuverMap.NO_MANEUVER_BYTE, frame.maneuverId)
         assertEquals("1", frame.status)
         assertEquals("1", frame.continueFlag)
     }

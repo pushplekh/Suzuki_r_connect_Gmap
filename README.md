@@ -21,6 +21,51 @@ The app:
 Project structure docs: `android/HANDOFF.md`.
 Build artifact: `android/app/build/outputs/apk/debug/app-debug.apk`.
 
+## Android release builds
+
+The application name is **REDLINE**. Pushplekh is credited as maintainer in
+About, with attribution to original author Arjun KR (mrwick).
+Version name and monotonically increasing version code are maintained in
+`android\gradle.properties`. Current version: **0.1.11 / code 12**.
+Increment the code for each distributed update, not every rebuild.
+
+Create your release key privately with Android Studio's **Generate Signed
+Bundle / APK** wizard, or `keytool`. Keep the keystore outside the repository,
+back it up securely, and reuse that same key for future updates. Never commit
+the key, passwords, signing configuration containing secrets, or debug keys.
+
+For command-line signing, provide all four environment variables in the build
+process: `REDLINE_KEYSTORE_PATH` (absolute path), `REDLINE_KEYSTORE_PASSWORD`,
+`REDLINE_KEY_ALIAS`, and `REDLINE_KEY_PASSWORD`. On GitHub Actions, supply
+passwords through repository secrets and materialize the key only on the runner.
+Partial signing configuration fails explicitly.
+
+From the `android` directory:
+
+```powershell
+.\gradlew.bat :app:assembleRelease --console=plain
+```
+
+With signing configured, the output is
+`app\build\outputs\apk\release\app-release.apk`.
+**Without signing variables this intentionally produces an unsigned
+`app-release-unsigned.apk`; it is not installable or ready to publish.**
+Do not substitute a debug-signed APK for a public release.
+
+Before publishing, verify the signed APK with Android SDK `apksigner verify
+--verbose --print-certs`, confirm the version in `output-metadata.json`, and
+test that exact APK on a stationary bike. Attach the signed APK as
+`redline-0.1.11-code12.apk` to GitHub release tag `v0.1.11`, with a SHA-256
+checksum and release notes. Retain
+`app\build\outputs\mapping\release\mapping.txt` privately for crash decoding.
+The release package is `dev.mrwick.redline`; debug uses
+`dev.mrwick.redline.debug`, so switching to release does not migrate debug data.
+
+This configuration does not constitute a public-repository readiness review.
+Before making a repository public, review tracked files and history for private
+data, OEM artifacts and licensing/redistribution requirements; preserve upstream
+attribution and license notices. No repository or release is published by building.
+
 ## For a new conversation picking this up
 
 If you're a fresh Claude agent loading this project for the first time, **read in this order**:

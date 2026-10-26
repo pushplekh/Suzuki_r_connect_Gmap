@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import dev.mrwick.redline.ble.BleScanner
 import dev.mrwick.redline.ble.DiscoveredBike
 import dev.mrwick.redline.data.Settings
+import dev.mrwick.redline.protocol.SuzukiModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -50,9 +51,9 @@ class OnboardingViewModel(app: Application) : AndroidViewModel(app) {
     fun stopScan() = scanner.stop()
 
     /** Persist the chosen bike's MAC, then advance to the final step. */
-    fun pickBike(bike: DiscoveredBike) {
+    fun pickBike(bike: DiscoveredBike, model: SuzukiModel) {
         viewModelScope.launch {
-            settings.setBikeMac(bike.mac)
+            settings.setPairedBike(bike.mac, bike.name, model)
             scanner.stop()
             next()
         }

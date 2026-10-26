@@ -1,5 +1,24 @@
 # Suzuki Connect Protocol Notes
 
+## Android build identity and credits (2026-10-26)
+
+Current persisted version: **0.1.11 / code 12**.
+Maintain appVersionName/appVersionCode in android/gradle.properties and increment
+the code for each distributed update. Code 10 was 0.1.9-call-alerts.
+
+The application name remains REDLINE; maintainer names are not version labels.
+About identifies Pushplekh as this build's maintainer only in Credits. The card retains
+a small bottom-right attribution to original author Arjun KR (mrwick) and the
+original-project GitHub link. No fork URL was supplied. Package identity remains
+unchanged within each build variant. Release and debug have distinct package IDs.
+About is scrollable
+to keep credits and controls accessible on smaller screens.
+
+Public release signing is configured through four REDLINE_* environment
+variables documented in README. No signing key is generated or committed.
+Without those variables assembleRelease builds an unsigned artifact only.
+Code 11's maintainer-labelled version is superseded by the plain version above.
+
 > Living spec for the BLE protocol between the Suzuki Connect Android app and the Suzuki Gixxer SF 150 (2023). Grown milestone-by-milestone.
 
 ## Cloud API architecture (M1 — confirmed from decompiled source, re-audited 2026-05-24)

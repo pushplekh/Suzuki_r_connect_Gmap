@@ -11,6 +11,8 @@ import dev.mrwick.redline.ble.BleScanner
 import dev.mrwick.redline.ble.ConnectionState
 import dev.mrwick.redline.ble.DiscoveredBike
 import dev.mrwick.redline.data.Settings
+import dev.mrwick.redline.protocol.PairedSuzuki
+import dev.mrwick.redline.protocol.SuzukiModel
 import dev.mrwick.redline.util.AppLog
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -45,6 +47,16 @@ class PairingViewModel(app: Application) : AndroidViewModel(app) {
      *  already-paired bike short of clearing app data. */
     val pairedMac: kotlinx.coroutines.flow.StateFlow<String?> = settings.bikeMac
         .stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, null)
+
+    val pairedSuzuki = settings.pairedSuzuki
+        .stateIn(viewModelScope, SharingStarted.Eagerly, PairedSuzuki())
+
+    fun selectModel(model: SuzukiModel) {
+        viewModelScope.launch {
+            AppLog.i(tag, "Suzuki model selection=$model")
+            settings.setSuzukiModel(model)
+        }
+    }
 
     /** Live connection state of the saved bike, exposed for the "Currently paired"
      *  card. Falls back to Idle when the service hasn't started yet. */
@@ -102,11 +114,12 @@ class PairingViewModel(app: Application) : AndroidViewModel(app) {
     /** Persist the chosen bike's MAC, then drive [pairState] from [ConnectionState].
      *  Calls [onDone] once the bike reports Ready (or after a 15 s timeout — pairing
      *  isn't strictly blocked on that, the service will keep retrying via autoConnect). */
-    fun pickBike(bike: DiscoveredBike, onDone: () -> Unit) {
+    fun pickBike(bike: DiscoveredBike, model: SuzukiModel = SuzukiModel.AUTO, onDone: () -> Unit) {
         AppLog.i(tag, "pickBike mac=${bike.mac} name=${bike.name} rssi=${bike.rssi}")
         viewModelScope.launch {
             _pairState.value = PairUiState.Saving(bike)
-            settings.setBikeMac(bike.mac)
+            scanner.stop()
+            settings.setPairedBike(bike.mac, bike.name, model)
             AppLog.i(tag, "bike MAC saved to DataStore; waiting for BleClient to reach Ready")
 
             // If the BikeBridgeService isn't running yet (e.g. user paired before tapping

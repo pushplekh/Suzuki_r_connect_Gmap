@@ -12,16 +12,18 @@ import android.view.ViewGroup
 import android.widget.ImageView
 import kotlinx.coroutines.flow.first
 import android.widget.TextView
+import dev.mrwick.redline.protocol.SuzukiProfile
+import dev.mrwick.redline.util.AppLog
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Parses Google Maps turn-by-turn notifications into [ParsedNavData].
  *
- * PARKED (2026-06-04): the whole Google Maps nav pipeline is shelved — the
- * notification-scrape → guessed-Mappls-ID path produced wrong cluster arrows.
- * [dev.mrwick.redline.notifications.NotificationDispatcher] no longer routes
- * Maps notifications here, so nothing in this file runs at present. The planned
- * replacement drives nav from the Mappls Navigation SDK. Treat the notes below
- * as historical until the pipeline is revived.
+ * The notification provides live route text, remaining distance and ETA.
+ * Maneuver IDs inferred from Google Maps notification text/icons are heuristic;
+ * Suzuki's cluster-byte translation is applied after that classification. Verify
+ * arrows on the target cluster during a stationary route test before relying on
+ * them while riding.
  *
  * 2026-05-25 empirical finding (see captures/maps-notification-dump-*.md): current Maps
  * versions on Android 16 use the standard `Notification.extras` ProgressStyle template,
@@ -30,16 +32,18 @@ import android.widget.TextView
  * Layout we observe in extras:
  *   android.title       → "Head toward MG Road" / "In 200 m turn left" — the instruction
  *   android.subText     → "Arrive 8:14 am" / "5 min · 1.2 km" — ETA + maybe total dist
- *   android.progress    → meters elapsed into the current maneuver segment
- *   android.progressMax → meters total for the current segment
+ *   android.progress    → route progress (2026-10-20 capture interpretation)
+ *   android.progressMax → route extent, unchanged across multiple turns
  *   android.largeIcon   → the turn-arrow Bitmap (132×132 typical)
  *
  * Strategy:
  *  1. Try extras path first (handles current Maps versions cleanly)
  *  2. Fall back to RemoteViews-walk for older Maps that still ships nav_title etc.
- *  3. Return null only if both paths produce nothing useful.
+ *  3. Treat lifecycle notifications separately; never substitute route distance
+ *     for a missing next-turn distance.
  */
 object GoogleMapsParser {
+    private val traceSequence = AtomicLong()
 
     /** Google Maps' Play Store / system package name. */
     const val PKG_GOOGLE_MAPS = "com.google.android.apps.maps"
@@ -51,19 +55,53 @@ object GoogleMapsParser {
     fun parse(context: Context, sbn: StatusBarNotification): ParsedNavData? {
         if (sbn.packageName != PKG_GOOGLE_MAPS) return null
         val notification = sbn.notification ?: return null
+        val receivedElapsedMs = System.nanoTime() / 1_000_000
+        val traceId = "maps-${System.currentTimeMillis()}-${traceSequence.incrementAndGet()}"
+        val extras = notification.extras
+        AppLog.i(
+            "NavTrace",
+            "INPUT direction=MAPS_TO_APP source=ANDROID_NOTIFICATION trace=$traceId build=${dev.mrwick.redline.BuildConfig.SOURCE_FINGERPRINT.take(16)} keyHash=${sbn.key.hashCode()} postedMs=${sbn.postTime} " +
+                "receivedMs=${System.currentTimeMillis()} postAgeMs=${System.currentTimeMillis() - sbn.postTime} " +
+                "notificationWhen=${notification.`when`} flags=0x${notification.flags.toString(16)} " +
+                "interactive=${context.getSystemService(android.os.PowerManager::class.java).isInteractive} " +
+                "powerSave=${context.getSystemService(android.os.PowerManager::class.java).isPowerSaveMode} " +
+                "title=${NavDiagnostics.quoted(extras?.getCharSequence(Notification.EXTRA_TITLE))} " +
+                "text=${NavDiagnostics.quoted(extras?.getCharSequence(Notification.EXTRA_TEXT))} " +
+                "subText=${NavDiagnostics.quoted(extras?.getCharSequence(Notification.EXTRA_SUB_TEXT))} " +
+                "bigText=${NavDiagnostics.quoted(extras?.getCharSequence(Notification.EXTRA_BIG_TEXT))} " +
+                "summary=${NavDiagnostics.quoted(extras?.getCharSequence(Notification.EXTRA_SUMMARY_TEXT))} " +
+                "textLines=${extras?.getCharSequenceArray(Notification.EXTRA_TEXT_LINES)?.joinToString(prefix = "[", postfix = "]") { NavDiagnostics.quoted(it) }} " +
+                "progress=${extras?.getInt(Notification.EXTRA_PROGRESS, -1)} " +
+                "progressMax=${extras?.getInt(Notification.EXTRA_PROGRESS_MAX, -1)} " +
+                "indeterminate=${extras?.getBoolean(Notification.EXTRA_PROGRESS_INDETERMINATE)} " +
+                "template=${NavDiagnostics.quoted(extras?.getString(Notification.EXTRA_TEMPLATE))}",
+        )
+        val profile = kotlinx.coroutines.runBlocking {
+            dev.mrwick.redline.app.AppGraph.settings(context).pairedSuzuki.first().profile
+        }
 
         // Primary path: extras (current Maps versions).
-        parseFromExtras(context, notification)?.let { return it }
-
-        // Fallback: RemoteViews tree walk for older Maps versions.
-        return parseFromRemoteViews(context, notification)
+        val parsed = parseFromExtras(context, notification, profile, traceId)
+            ?: parseFromRemoteViews(context, notification, profile, traceId)
+        if (parsed == null) {
+            AppLog.w("NavTrace", "REJECT trace=$traceId neither extras nor RemoteViews produced navigation data")
+            return null
+        }
+        val traced = parsed.copy(traceId = traceId, sourceElapsedMs = receivedElapsedMs)
+        AppLog.i(
+            "NavTrace",
+            "PARSED source=APP_PARSER ${NavDiagnostics.fields(traced.toNavFrame())} " +
+                "instruction=${NavDiagnostics.quoted(traced.streetName)} profile=${profile.description} " +
+                "parseMs=${System.nanoTime() / 1_000_000 - receivedElapsedMs}",
+        )
+        return traced
     }
 
     // ----------------------------------------------------------------------
     // Primary path: Notification.extras (Maps ProgressStyle template)
     // ----------------------------------------------------------------------
 
-    private fun parseFromExtras(context: Context, n: Notification): ParsedNavData? {
+    private fun parseFromExtras(context: Context, n: Notification, profile: SuzukiProfile, traceId: String): ParsedNavData? {
         val extras = n.extras ?: return null
         val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()
         val subText = extras.getCharSequence(Notification.EXTRA_SUB_TEXT)?.toString()
@@ -71,17 +109,14 @@ object GoogleMapsParser {
 
         if (title.isNullOrBlank() && subText.isNullOrBlank() && text.isNullOrBlank()) return null
 
-        // Distance: prefer the explicit "In X m / X km" prefix from the title;
-        // fall back to progress/progressMax (meters) if no inline distance string.
-        val distFromTitle = title?.let { extractInlineDistance(it) }
-        val (distNext, distNextUnit) = distFromTitle ?: distanceFromProgress(extras)
-
-        // ETA: subText is often "Arrive H:MM am/pm" OR "5 min · 1.2 km · 4:32 PM".
-        val eta = normalizeEta(subText, twelveHour = true)
-        val (distTotal, distTotalUnit) = extractTotalDistance(subText)
-
-        // Instruction string for the maneuver classifier text fallback.
-        val instruction = title ?: text
+        val content = MapsNotificationContent(
+            title, text, subText,
+            extras.getInt(Notification.EXTRA_PROGRESS, -1),
+            extras.getInt(Notification.EXTRA_PROGRESS_MAX, -1),
+            extras.getBoolean(Notification.EXTRA_PROGRESS_INDETERMINATE),
+            extras.getString(Notification.EXTRA_TEMPLATE) != null,
+        )
+        val instruction = content.instruction
 
         // Maneuver bitmap: largeIcon on this notification is the turn arrow.
         val maneuverBitmap = extractLargeIconBitmap(context, n)
@@ -91,45 +126,26 @@ object GoogleMapsParser {
         val selfTrain = kotlinx.coroutines.runBlocking {
             dev.mrwick.redline.app.AppGraph.settings(context).maneuverSelfTrainEnabled.first()
         }
-        val mapplsId = ManeuverClassifier.classify(maneuverBitmap, instruction, selfTrain)
-        val maneuverId = ManeuverMap.mapplsIdToClusterByte(mapplsId, null)
-            ?: ManeuverMap.DEFAULT_CLUSTER_BYTE
+        val classification = ManeuverClassifier.classifyDetailed(maneuverBitmap, instruction, selfTrain)
+        val parsed = content.parse(profile, classification.id)
+        AppLog.i(
+            "NavTrace",
+            "DECISION trace=$traceId path=extras state=${parsed.navigationState} " +
+                "headingOnly=${content.isHeadingOnly} arrowPolicy=${if (content.isHeadingOnly) "explicit-compass-only-NOT-relative-turn" else "maneuver-or-lifecycle"} " +
+                "roundaboutExit=${parsed.roundaboutExit} exitAngle=unavailable geometry=unavailable " +
+                "nextSource=${if (parsed.nextDistanceKnown) "instruction-prefix" else "unavailable-NOT-route-progress"} " +
+                "totalSource=${parsed.totalDistanceSource} routeRemainingMetres=${parsed.routeRemainingMetres} " +
+                "routeTravelledMetres=${parsed.routeTravelledMetres} etaSource=${etaInputSource(subText)} " +
+                "mapplsId=${classification.id} classifier=${classification.source} textId=${classification.textId} " +
+                "hashId=${classification.hashId} iconHash=${classification.hash?.let { java.lang.Long.toHexString(it) }} " +
+                "iconSize=${maneuverBitmap?.width}x${maneuverBitmap?.height} selfTrain=$selfTrain",
+        )
         dev.mrwick.redline.util.AppLog.i(
             "MapsParser",
-            "notif title=\"${title?.take(60)}\" bitmap=${maneuverBitmap != null} -> mapplsId=$mapplsId clusterByte=$maneuverId",
+            "notif title=\"${title?.take(60)}\" bitmap=${maneuverBitmap != null} -> mapplsId=${classification.id ?: "unclassified"} clusterByte=${parsed.maneuverId} state=${parsed.navigationState} profile=${profile.description}",
         )
 
-        return ParsedNavData(
-            maneuverId = maneuverId,
-            distNext = distNext,
-            distNextUnit = distNextUnit,
-            eta = eta,
-            distTotal = distTotal,
-            distTotalUnit = distTotalUnit,
-            streetName = instruction,
-        )
-    }
-
-    /** "In 200 m turn left" / "In 1.2 km" / "Turn right in 50 m" → (distance string, unit). */
-    private fun extractInlineDistance(text: String): Pair<String, String>? {
-        val re = Regex("""(?i)(?:in\s+)?(\d+(?:[.,]\d+)?)\s*(km|kilometers?|m|meters?|mi|miles?|ft|feet?)\b""")
-        val match = re.find(text) ?: return null
-        return normalizeDistance(match.value)
-    }
-
-    /** Use ProgressStyle's `progressMax - progress` (meters) when no inline distance is in title. */
-    private fun distanceFromProgress(extras: android.os.Bundle): Pair<String, String> {
-        val max = extras.getInt("android.progressMax", -1)
-        val cur = extras.getInt("android.progress", 0)
-        if (max <= 0) return "0000" to "M"
-        val remainingMeters = (max - cur).coerceAtLeast(0)
-        return if (remainingMeters >= 1000) {
-            val km = remainingMeters / 1000.0
-            // 4-char "XX.X" format
-            "%4.1f".format(km.coerceAtMost(99.9)).replace(' ', '0') to "K"
-        } else {
-            "%04d".format(remainingMeters.coerceAtMost(9999)) to "M"
-        }
+        return parsed
     }
 
     /** Pull the Bitmap out of Notification.largeIcon (when present + bitmap-backed). */
@@ -147,7 +163,7 @@ object GoogleMapsParser {
     // Fallback path: RemoteViews tree walk (older Maps versions, 2020 GMapsParser)
     // ----------------------------------------------------------------------
 
-    private fun parseFromRemoteViews(context: Context, notification: Notification): ParsedNavData? {
+    private fun parseFromRemoteViews(context: Context, notification: Notification, profile: SuzukiProfile, traceId: String): ParsedNavData? {
         val bigViews = try {
             Notification.Builder.recoverBuilder(context, notification).createBigContentView()
         } catch (_: Throwable) { null }
@@ -180,22 +196,18 @@ object GoogleMapsParser {
 
         if (distRaw.isNullOrBlank() && instruction.isNullOrBlank()) return null
 
-        val (distNext, distNextUnit) = normalizeDistance(distRaw)
-        val (distTotal, distTotalUnit) = extractTotalDistance(timeRaw)
-        val eta = normalizeEta(timeRaw, twelveHour = true)
-        val mapplsId = ManeuverClassifier.classify(maneuverBitmap, instruction)
-        val maneuverId = ManeuverMap.mapplsIdToClusterByte(mapplsId, null)
-            ?: ManeuverMap.DEFAULT_CLUSTER_BYTE
-
-        return ParsedNavData(
-            maneuverId = maneuverId,
-            distNext = distNext,
-            distNextUnit = distNextUnit,
-            eta = eta,
-            distTotal = distTotal,
-            distTotalUnit = distTotalUnit,
-            streetName = instruction,
+        val classification = ManeuverClassifier.classifyDetailed(maneuverBitmap, instruction, selfTrainEnabled = false)
+        val parsed = MapsNotificationContent(distRaw, instruction, timeRaw).parse(profile, classification.id)
+        AppLog.i(
+            "NavTrace",
+            "DECISION trace=$traceId path=remoteViews nextRaw=${NavDiagnostics.quoted(distRaw)} " +
+                "roundaboutExit=${parsed.roundaboutExit} exitAngle=unavailable geometry=unavailable " +
+                "timeRaw=${NavDiagnostics.quoted(timeRaw)} totalSource=${parsed.totalDistanceSource} state=${parsed.navigationState} etaSource=${etaInputSource(timeRaw)} " +
+                "mapplsId=${classification.id} classifier=${classification.source} textId=${classification.textId} " +
+                "hashId=${classification.hashId} iconHash=${classification.hash?.let { java.lang.Long.toHexString(it) }} " +
+                "iconSize=${maneuverBitmap?.width}x${maneuverBitmap?.height} selfTrain=false",
         )
+        return parsed
     }
 
     /** RemoteViews tree walker (fallback path). */
@@ -227,14 +239,4 @@ object GoogleMapsParser {
         return bitmap
     }
 
-    /** Pull the total-distance segment out of "5 min · 1.2 km · 4:32 PM". */
-    private fun extractTotalDistance(timeRaw: String?): Pair<String, String> {
-        if (timeRaw.isNullOrBlank()) return "0000" to "M"
-        val distRegex = Regex(
-            """(\d+(?:[.,]\d+)?)\s*(km|m|mi|ft)""",
-            RegexOption.IGNORE_CASE,
-        )
-        val match = distRegex.find(timeRaw) ?: return "0000" to "M"
-        return normalizeDistance(match.value)
-    }
 }

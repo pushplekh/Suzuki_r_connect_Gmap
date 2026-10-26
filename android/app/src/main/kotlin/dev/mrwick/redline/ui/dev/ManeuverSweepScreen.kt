@@ -40,8 +40,8 @@ import java.io.File
 /**
  * Empirical verification tool for the Suzuki cluster's byte→glyph table.
  *
- * Iterates cluster bytes 1..53 (1..52 is the OEM `A0.C()` output range; 43
- * and 53 are added as out-of-table probes — see
+ * Iterates cluster bytes 1..53 (1..52 is the OEM `B0.C()` output range; 53
+ * is an out-of-table probe — see
  * `docs/superpowers/specs/2026-05-25-maneuver-id-rework-design.md`).
  * For each byte, sends an a531 NavFrame at 1 Hz for [BURST_SECONDS] seconds
  * so the cluster's nav-mode latch has time to engage (single-shot writes
@@ -119,6 +119,10 @@ fun ManeuverSweepScreen() {
                                 )
                                 val ok = AppGraph.sendFrame(frame.encode())
                                 AppLog.d("ClusterSweep", "burst tick byte=$byte ok=$ok")
+                                if (!ok) {
+                                    lastSent = "byte=$byte not delivered; check cluster connection in Diagnostics"
+                                    return@launch
+                                }
                                 delay(1000L)
                             }
                             lastSent = "byte=$byte burst done"
@@ -169,6 +173,6 @@ private fun ClusterByteRow(
 private const val BURST_SECONDS = 5
 private const val GLYPH_TSV_FILENAME = "cluster_byte_glyphs.tsv"
 
-/** Cluster bytes the OEM emits in A0.C()'s default branch (1..52). Plus 43
- *  and 53 are included as "is the cluster ROM hiding something here?" checks. */
+/** Cluster bytes the OEM emits in B0.C()'s default branch (1..52). Byte 53
+ *  is included as an "is the cluster ROM hiding something here?" check. */
 private val CLUSTER_BYTES: List<Int> = (1..53).toList()

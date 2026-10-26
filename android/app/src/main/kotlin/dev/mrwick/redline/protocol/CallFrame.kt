@@ -7,14 +7,14 @@ import androidx.compose.runtime.Immutable
  *
  * Two source paths in the app:
  *   - CallReceiverBroadcast.d(): cellular call, byte 22 = 'N'
- *   - NotificationService.q(): WhatsApp call, byte 22 = 'W'
+ *   - NotificationService.r() (7.6): WhatsApp call, byte 22 = 'W'
  *
  * State byte (23) is '1' or '2'; '2' set in WhatsApp path when str2=="2",
- * and in cellular path when str2!="2" AND missed-call count l!=0.
+ * and in cellular path when str2=="2" AND prior call state l!=0.
  */
 @Immutable
 data class CallFrame(
-    val number: String,
+    val number: String, // OEM sends the contact name when resolved, otherwise the number.
     val isWhatsapp: Boolean = false,
     val state: Int = 0x31,
     override val raw: ByteArray? = null,

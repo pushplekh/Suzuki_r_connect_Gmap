@@ -57,7 +57,8 @@ fun DeveloperSettingsScreen(
     val autoStart by vm.autoStartOnBoot.collectAsStateWithLifecycle()
     val keepScreenOn by vm.keepScreenOn.collectAsStateWithLifecycle()
     val appLock by vm.appLockEnabled.collectAsStateWithLifecycle()
-    // PARKED (2026-06-04): maneuver classifier shelved with Google Maps nav.
+    // Keep self-training opt-in: a mistaken text guess can persist a bad
+    // bitmap-to-maneuver mapping and affect later routes.
     // val maneuverSelfTrain by vm.maneuverSelfTrainEnabled.collectAsStateWithLifecycle()
     val ctx = LocalContext.current
 
@@ -91,7 +92,8 @@ fun DeveloperSettingsScreen(
                     "Range on cluster (experimental — unverified on bike)",
                     rangeOnCluster,
                 ) { v -> rangeScope.launch { settingsForRange.setRangeOnCluster(v) } }
-                // PARKED (2026-06-04): maneuver self-train shelved with Google Maps nav.
+                // Self-training remains hidden until classification can be
+                // validated against known maneuver icons on the target cluster.
                 // DevSwitchRow(
                 //     "Maneuver self-train (bitmap hash from text)",
                 //     maneuverSelfTrain,
@@ -121,7 +123,7 @@ fun DeveloperSettingsScreen(
                     smsDbg = it; AppGraph.debugSmsPending = it
                 }
                 var callDbg by remember { mutableStateOf(AppGraph.debugCallPending) }
-                DevSwitchRow("LED test: a533 Call byte (15) = pending", callDbg) {
+                DevSwitchRow("LED test: force Call byte (15) = Y (clear)", callDbg) {
                     callDbg = it; AppGraph.debugCallPending = it
                 }
                 Spacer(modifier = Modifier.height(8.dp))

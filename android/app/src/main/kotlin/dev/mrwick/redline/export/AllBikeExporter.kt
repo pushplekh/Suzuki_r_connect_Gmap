@@ -130,7 +130,7 @@ object AllBikeExporter {
                 bikeLiveKmPerL = null, bikeFuelBars = currentFuelBars, capacityL = tankCapacityL,
             )
             if (tank != null) {
-                appendLine("Current tank: ${"%.1f".format(tank.litresLeft)} L (${(tank.percent * 100).toInt()}%), range ~${tank.rangeKm.toInt()} km (est.)${if (tank.isRough) " [rough, pre-first-fill]" else ""}")
+                appendLine("Current tank: ${"%.1f".format(tank.litresLeft)} L (${(tank.percent * 100).toInt()}%), range ~${tank.rangeKm.toInt()} km (est.)${if (tank.isRough) " [rough cluster-gauge estimate]" else " [fill-log estimate]"}")
             }
             appendLine()
 

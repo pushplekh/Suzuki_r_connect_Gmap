@@ -12,7 +12,7 @@ class HeartbeatLoop(
     private val phoneBatteryProvider: () -> Pair<Int, Boolean>, // (percent, isCharging)
     private val signalBarsProvider: () -> Int,                  // 0..3 cell bars
     private val smsPendingProvider: () -> Boolean,
-    private val callPendingProvider: () -> Boolean,
+    private val callPendingProvider: () -> Boolean, // Legacy name: true emits Y (OEM call-cleared flag).
     private val weatherProvider: () -> Pair<Int, Int>,          // (suzukiCode, tempByte)
     private val clock: () -> LocalTime = { LocalTime.now() },
 ) {
@@ -47,7 +47,7 @@ class HeartbeatLoop(
         return HeartbeatFrame(
             batteryBucket = bucket,
             charging = if (charging) "Y" else "N",
-            speedStr = "",   // ride-pcap confirms this field is stale in firmware; safe to leave empty
+            speedStr = "",   // OEM speed-warning limit: empty encodes its disabled state (FF FF FF).
             signalStatus = sigBars,
             timeHhmmss = time,
             smsPending = if (smsPendingProvider()) "Y" else "N",

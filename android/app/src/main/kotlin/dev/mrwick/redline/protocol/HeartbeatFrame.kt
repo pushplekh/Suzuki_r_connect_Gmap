@@ -4,8 +4,8 @@ import androidx.compose.runtime.Immutable
 
 /**
  * a533 — phone -> bike. Despite the "heartbeat" name, this carries a full
- * environmental dashboard: phone battery + cell signal + time + SMS/call
- * flags + weather code + outdoor temperature.
+ * environmental dashboard: phone battery + speed-warning limit + cell signal
+ * + time + SMS/call flags + weather code + outdoor temperature.
  *
  * For the K.g==false branch (Gixxer SF 150, Avenis, others), [weather] /
  * [tempFPlus115] / [tailConst] are meaningful. For K.g==true (Access 125,
@@ -15,7 +15,7 @@ import androidx.compose.runtime.Immutable
 data class HeartbeatFrame(
     val batteryBucket: String,
     val charging: String,
-    val speedStr: String,
+    val speedStr: String, // Legacy name: configured warning threshold, not measured speed; empty disables.
     val signalStatus: String,
     val timeHhmmss: String,
     val smsPending: String,

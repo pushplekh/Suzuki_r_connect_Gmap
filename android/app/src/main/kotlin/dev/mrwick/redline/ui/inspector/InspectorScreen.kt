@@ -48,7 +48,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.mrwick.redline.ble.FrameEvent
 import dev.mrwick.redline.export.CsvExporter
 import dev.mrwick.redline.protocol.FrameType
-import dev.mrwick.redline.protocol.decodeFrame
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -203,10 +202,10 @@ private fun FrameRow(event: FrameEvent) {
     val time = remember(event.tMillis) {
         SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date(event.tMillis))
     }
-    val decoded = remember(event.bytes) {
+    val decoded = remember(event.bytes, event.protocol) {
         if (event.bytes.size == 30) {
             try {
-                decodeFrame(event.bytes).toString()
+                event.protocol.decode(event.bytes).toString()
             } catch (_: Throwable) {
                 "(undecoded)"
             }

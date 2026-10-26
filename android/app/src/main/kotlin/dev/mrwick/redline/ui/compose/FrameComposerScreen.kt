@@ -312,8 +312,8 @@ private fun MissedCallForm(vm: FrameComposerViewModel) {
 
     OutlinedTextField(
         value = name,
-        onValueChange = { name = it.take(18) },
-        label = { Text("Caller name (<=18 chars)") },
+        onValueChange = { name = it.take(20) },
+        label = { Text("Caller name (<=20 chars)") },
         modifier = Modifier.fillMaxWidth(),
     )
     OutlinedTextField(

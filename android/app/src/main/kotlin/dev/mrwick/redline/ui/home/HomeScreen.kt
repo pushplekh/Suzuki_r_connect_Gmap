@@ -22,6 +22,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -33,6 +37,14 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.mrwick.redline.analytics.FuelEstimate
 import dev.mrwick.redline.ble.ConnectionState
 import dev.mrwick.redline.location.LastParked
+import dev.mrwick.redline.nav.MapsNavSource
+import dev.mrwick.redline.nav.MapsNavigationState
+import dev.mrwick.redline.nav.ParsedNavData
+import dev.mrwick.redline.nav.NavigationFreshness
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
+import kotlinx.coroutines.delay
 import dev.mrwick.redline.protocol.TelemetryFrame
 import dev.mrwick.redline.ui.components.BentoTile
 import dev.mrwick.redline.ui.components.GixxerIcons
@@ -74,6 +86,18 @@ fun HomeScreen(
     val fuelEstimate by vm.fuelEstimate.collectAsStateWithLifecycle()
     val lastParked by vm.lastParked.collectAsStateWithLifecycle()
     val refuelPrompt by vm.refuelPrompt.collectAsStateWithLifecycle()
+    val navigation by MapsNavSource.parsed.collectAsStateWithLifecycle()
+    val navigationFreshness by MapsNavSource.freshness.collectAsStateWithLifecycle()
+    var nowElapsedMs by remember { mutableStateOf(System.nanoTime() / 1_000_000) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(lifecycleOwner) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (true) {
+                nowElapsedMs = System.nanoTime() / 1_000_000
+                delay(1_000)
+            }
+        }
+    }
 
     HomeContent(
         connectionState = connectionState,
@@ -90,6 +114,9 @@ fun HomeScreen(
         onOpenPairing = onOpenPairing,
         onOpenMaintenance = onOpenMaintenance,
         onSnoozeRefuelPrompt = vm::snoozeRefuelPrompt,
+        navigation = navigation,
+        navigationFreshness = navigationFreshness,
+        nowElapsedMs = nowElapsedMs,
     )
 }
 
@@ -110,6 +137,9 @@ fun HomeContent(
     onOpenPairing: () -> Unit = {},
     onOpenMaintenance: () -> Unit = {},
     onSnoozeRefuelPrompt: () -> Unit = {},
+    navigation: ParsedNavData? = null,
+    navigationFreshness: NavigationFreshness = NavigationFreshness(),
+    nowElapsedMs: Long = 0,
 ) {
     val live = connectionState is ConnectionState.Ready
     val ctx = LocalContext.current // used for maps intents passed to child tiles
@@ -122,6 +152,7 @@ fun HomeContent(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         TopStatusZone(connectionState, riderName)
+        NavigationTile(navigation, live, navigationFreshness, nowElapsedMs)
 
         if (live) {
             RangeHero(rangeKm = fuelEstimate?.rangeKm, fuelBars = telemetry?.fuelBars, index = 0)
@@ -153,6 +184,60 @@ fun HomeContent(
         TodayStrip(todayKm, streak, index = 4)
 
         QuickActions(onOpenNav, onStartRide, onOpenPairing)
+    }
+}
+
+@Composable
+private fun NavigationTile(
+    nav: ParsedNavData?,
+    connected: Boolean,
+    freshness: NavigationFreshness,
+    nowElapsedMs: Long,
+) {
+    BentoTile(modifier = Modifier.fillMaxWidth(), index = 0) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(
+                if (connected) freshness.message(nowElapsedMs) else "Cluster disconnected",
+                style = MaterialTheme.typography.titleMedium,
+            )
+            if (!connected) {
+                Text(freshness.message(nowElapsedMs), style = MaterialTheme.typography.bodySmall)
+            }
+            Text(freshness.ageMessage(nowElapsedMs), style = MaterialTheme.typography.bodySmall)
+            if (freshness.isStale(nowElapsedMs)) {
+                Text("Old guidance cleared. Missing updates do not confirm a route divergence.",
+                    style = MaterialTheme.typography.bodySmall)
+            }
+            if (nav != null && !freshness.isStale(nowElapsedMs)) {
+                Text(nav.streetName.orEmpty(), style = MaterialTheme.typography.bodyMedium)
+                nav.roundaboutExit?.let {
+                    Text("Roundabout: exit $it (angle not supplied)", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+            if (nav?.navigationState == MapsNavigationState.NAVIGATING && !freshness.isStale(nowElapsedMs)) {
+                Text(
+                    if (nav.nextDistanceKnown) "Next maneuver: ${dev.mrwick.redline.nav.navigationDistanceLabel(nav.distNext, nav.distNextUnit)}"
+                    else "Next-turn distance not supplied by Maps",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Text(
+                    "Route remaining: ${dev.mrwick.redline.nav.navigationDistanceLabel(nav.distTotal, nav.distTotalUnit)}",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                nav.routeTravelledMetres?.let {
+                    Text("Maps route progress: $it m (resets on rerouting)", style = MaterialTheme.typography.bodySmall)
+                }
+                Text(
+                    "Arrival time: ${nav.eta.takeIf { it.isNotBlank() } ?: "unavailable"}",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            Text(
+                if (connected) "BLE connected; display rendering is not acknowledged"
+                else "Cluster disconnected - these updates are not being sent",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
     }
 }
 
@@ -279,7 +364,8 @@ private fun FuelTile(
             }
             Spacer(Modifier.height(8.dp))
             Text(
-                "%.1f L left".format(estimate.litresLeft),
+                if (estimate.isRough) "~%.1f L left · cluster gauge estimate".format(estimate.litresLeft)
+                else "~%.1f L left · fill-log estimate".format(estimate.litresLeft),
                 style = MaterialTheme.typography.bodySmall,
                 color = GixxerBrand.zoneCool,
             )

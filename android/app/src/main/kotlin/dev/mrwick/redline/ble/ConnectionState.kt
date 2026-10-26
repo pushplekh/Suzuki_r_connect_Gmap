@@ -14,7 +14,7 @@ sealed interface ConnectionState {
     /** Connected at the link layer; discovering services. */
     @Immutable
     data object Discovering : ConnectionState
-    /** Service discovery complete, notify subscription active, ready for writes. */
+    /** Notify subscription active and identity write acknowledged; ready for display writes. */
     @Immutable
     data object Ready : ConnectionState
     /** Bike disconnected; auto-reconnect (if enabled) will fire when it comes back. */

@@ -52,6 +52,26 @@ class ParsedNavToFrameTest {
         assertEquals("1", decoded.continueFlag)
     }
 
+    @Test
+    fun `destination arrival status survives frame encoding`() {
+        val frame = ParsedNavData(
+            maneuverId = 9,
+            distNext = "0000",
+            distNextUnit = "M",
+            eta = "0432PM",
+            distTotal = "0000",
+            distTotalUnit = "M",
+            streetName = "You have arrived at your destination",
+            status = "5",
+        ).toNavFrame()
+
+        val decoded = NavFrame.decode(frame.encode())
+        assertEquals(9, decoded.maneuverId)
+        assertEquals("0000", decoded.distNext)
+        assertEquals("0000", decoded.distTotal)
+        assertEquals("5", decoded.status)
+    }
+
     // ----- normalizeDistance ------------------------------------------------
 
     @Test
@@ -73,21 +93,47 @@ class ParsedNavToFrameTest {
     }
 
     @Test
-    fun `normalizeDistance returns 0000 on null or empty or junk`() {
-        assertEquals("0000" to "M", normalizeDistance(null))
-        assertEquals("0000" to "M", normalizeDistance(""))
-        assertEquals("0000" to "M", normalizeDistance("not a distance"))
+    fun `normalizeDistance leaves unknown distance blank instead of inventing zero`() {
+        for (input in listOf(null, "", "not a distance", "-1 m", "NaN km", "Infinity km")) {
+            assertEquals(input, "    " to "M", normalizeDistance(input))
+        }
     }
 
     @Test
-    fun `normalizeDistance folds miles and feet to K and M`() {
-        assertEquals("01.2" to "K", normalizeDistance("1.2 mi"))
-        assertEquals("0500" to "M", normalizeDistance("500 ft"))
+    fun `normalizeDistance converts miles and feet to metric`() {
+        assertEquals("01.9" to "K", normalizeDistance("1.2 mi"))
+        assertEquals("0152" to "M", normalizeDistance("500 ft"))
     }
 
     @Test
     fun `normalizeDistance handles km whole numbers up to 4 digits`() {
         assertEquals("1234" to "K", normalizeDistance("1234 km"))
+    }
+
+    @Test fun `metric conversion uses actual value and fits four ASCII characters`() {
+        for ((input, expected) in listOf(
+            "450 m" to ("0450" to "M"),
+            "999 m" to ("0999" to "M"),
+            "1000 m" to ("01.0" to "K"),
+            "1200 m" to ("01.2" to "K"),
+            "9999 m" to ("10.0" to "K"),
+            "10000 m" to ("10.0" to "K"),
+            "12500 m" to ("12.5" to "K"),
+            "99999 m" to ("0100" to "K"),
+            "100000 m" to ("0100" to "K"),
+            "9999000 m" to ("9999" to "K"),
+            "10000000 m" to ("    " to "K"),
+        )) {
+            val normalized = normalizeDistance(input)
+            assertEquals(input, expected, normalized)
+            assertEquals(input, 4, normalized.first.length)
+            assertEquals(input, normalized, normalizeDistance(input.replace(" m", " meters")))
+        }
+        assertEquals("450 m", navigationDistanceLabel("0450", "M"))
+        assertEquals("1.2 km", navigationDistanceLabel("01.2", "K"))
+        assertEquals("10 km", navigationDistanceLabel("10.0", "K"))
+        assertEquals("12.5 km", navigationDistanceLabel("12.5", "K"))
+        assertEquals("unavailable", navigationDistanceLabel("    ", "K"))
     }
 
     // ----- normalizeEta -----------------------------------------------------

@@ -1,6 +1,8 @@
 package dev.mrwick.redline.ble
 
 import android.util.Log
+import dev.mrwick.redline.util.AppLog
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -20,20 +22,39 @@ class FrameWriter {
 
     enum class Priority { URGENT, HEARTBEAT, NAV }
 
-    data class Entry(val priority: Priority, val frame: ByteArray, val note: String? = null)
+    data class Entry(
+        val priority: Priority,
+        val frame: ByteArray,
+        val note: String? = null,
+        val repeat: Boolean = false,
+        val completion: CompletableDeferred<Boolean>? = null,
+        val navTraceId: String? = null,
+        val navSourceElapsedMs: Long? = null,
+        val queuedElapsedMs: Long = System.nanoTime() / 1_000_000,
+        val callAlertRevision: Long? = null,
+    )
 
     private val urgent = Channel<Entry>(capacity = 32)
     private val heartbeat = Channel<Entry>(capacity = 4, onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST)
-    private val nav = Channel<Entry>(capacity = 4, onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST)
+    private val nav = Channel<Entry>(
+        capacity = 4,
+        onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST,
+        onUndeliveredElement = {
+            AppLog.w("NavTrace", "DROP trace=${it.navTraceId ?: "none"} note=${it.note} reason=queue-overflow-or-cancellation")
+        },
+    )
 
     private val _lastNav = MutableStateFlow<ByteArray?>(null)
     val lastNav: StateFlow<ByteArray?> = _lastNav.asStateFlow()
 
-    fun enqueue(entry: Entry) {
+    fun enqueue(entry: Entry): Boolean {
         // Drop identical-content NAV frames to avoid spamming the bike with no-ops.
         if (entry.priority == Priority.NAV) {
             val last = _lastNav.value
-            if (last != null && last.contentEquals(entry.frame)) return
+            if (!entry.repeat && last != null && last.contentEquals(entry.frame)) {
+                entry.completion?.complete(false)
+                return false
+            }
             _lastNav.value = entry.frame.copyOf()
         }
         val target = when (entry.priority) {
@@ -41,7 +62,12 @@ class FrameWriter {
             Priority.HEARTBEAT -> heartbeat
             Priority.NAV -> nav
         }
-        target.trySend(entry)
+        val accepted = target.trySend(entry).isSuccess
+        if (!accepted) {
+            AppLog.w("FrameWriter", "Queue rejected ${entry.note} priority=${entry.priority}")
+            entry.completion?.complete(false)
+        }
+        return accepted
     }
 
     /**

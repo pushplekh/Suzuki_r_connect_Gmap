@@ -98,4 +98,25 @@ class FuelTankEstimatorTest {
             )
         )
     }
+
+    @Test fun accessFiveBarsIsNotTenLitresAndOverridesFullFillLedger() {
+        val fills = listOf(fill(1, 0, 1000, 5.3))
+        fun estimate(bars: Int) = FuelTankEstimator.estimate(
+            fills, currentOdometerKm = 1000, avgKmPerL = 45.0,
+            bikeLiveKmPerL = null, bikeFuelBars = bars, capacityL = 5.3,
+        )!!
+        assertEquals(5.3 * 5 / 6, estimate(5).litresLeft, 0.001)
+        assertEquals(5.3 * 4 / 6, estimate(4).litresLeft, 0.001)
+        assertEquals(5.3, estimate(6).litresLeft, 0.001)
+        assertEquals(0.0, estimate(0).litresLeft, 0.001)
+        assertTrue(estimate(5).isRough)
+    }
+
+    @Test fun invalidBarsWithoutLedgerDoNotInventFuelLevel() {
+        for (bars in listOf(-1, 7, 255)) {
+            assertNull(FuelTankEstimator.estimate(
+                emptyList(), null, null, null, bars, 5.3,
+            ))
+        }
+    }
 }

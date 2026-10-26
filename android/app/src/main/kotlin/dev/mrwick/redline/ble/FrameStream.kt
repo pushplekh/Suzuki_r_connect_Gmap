@@ -2,6 +2,7 @@ package dev.mrwick.redline.ble
 
 import android.content.Context
 import androidx.compose.runtime.Immutable
+import dev.mrwick.redline.protocol.ClusterProtocol
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -34,12 +35,13 @@ class FrameStream {
     // frames; DROP_OLDEST drops the back of the buffer first so the most
     // recent traffic stays visible (audit finding 3.3).
     private val _events = MutableSharedFlow<FrameEvent>(
+        replay = 64,
         extraBufferCapacity = 256,
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
     val events: SharedFlow<FrameEvent> = _events.asSharedFlow()
 
-    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(1))
     private val tsFormat = ThreadLocal.withInitial { SimpleDateFormat(TS_FMT, Locale.US) }
     @Volatile private var activeFile: File? = null
     @Volatile private var rotatedFile: File? = null
@@ -53,7 +55,7 @@ class FrameStream {
 
     fun emit(event: FrameEvent) {
         val ok = _events.tryEmit(event)
-        android.util.Log.d("FrameStream", "emit dir=${event.direction} size=${event.bytes.size} ok=$ok subs=${_events.subscriptionCount.value}")
+        if (!ok) android.util.Log.w("FrameStream", "Could not publish live frame dir=${event.direction}")
         appendToFile(event)
     }
 
@@ -99,6 +101,7 @@ data class FrameEvent(
     val bytes: ByteArray,
     val tMillis: Long = System.currentTimeMillis(),
     val note: String? = null,
+    val protocol: ClusterProtocol = ClusterProtocol.STANDARD,
 ) {
     enum class Direction { TX, RX }
 
@@ -107,8 +110,9 @@ data class FrameEvent(
             direction == other.direction &&
             bytes.contentEquals(other.bytes) &&
             tMillis == other.tMillis &&
-            note == other.note
+            note == other.note &&
+            protocol == other.protocol
 
     override fun hashCode(): Int =
-        ((direction.hashCode() * 31 + bytes.contentHashCode()) * 31 + tMillis.hashCode()) * 31 + (note?.hashCode() ?: 0)
+        (((direction.hashCode() * 31 + bytes.contentHashCode()) * 31 + tMillis.hashCode()) * 31 + (note?.hashCode() ?: 0)) * 31 + protocol.hashCode()
 }

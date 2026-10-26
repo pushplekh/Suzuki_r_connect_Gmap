@@ -60,7 +60,7 @@ fun SettingsScreen(
             SettingsNavRow(
                 icon = Icons.Outlined.TwoWheeler,
                 label = "Bike",
-                description = "Rider name, pairing, safety",
+                description = "Rider name, Suzuki navigation model, pairing, safety",
                 onClick = onOpenBike,
             )
         }

@@ -1,18 +1,44 @@
 package dev.mrwick.redline.nav
 
+import android.content.ContextWrapper
+import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 
 /**
  * Tests for the OEM-ported Mappls-ID -> cluster-byte translation in
- * [ManeuverMap.mapplsIdToClusterByte]. Source of truth: A0.C() in the
- * decompiled Suzuki Connect APK (see docs/superpowers/specs/2026-05-25-maneuver-id-rework-design.md).
+ * [ManeuverMap.mapplsIdToClusterByte]. Source of truth: B0.C() in the
+ * supplied Suzuki Connect 7.6 APK, corroborating the earlier A0.C() decompilation
+ * (see docs/superpowers/specs/2026-05-25-maneuver-id-rework-design.md).
  *
  * The "default" branch is what our Gixxer SF 150 hits; the "Burgman" branch
  * is preserved for correctness on the small set of bikes the OEM special-cases.
  */
 class ManeuverMapTest {
+    @get:Rule val temporaryFolder = TemporaryFolder()
+
+    @Test fun `corrected semantics never load the legacy learned hash table`() {
+        val context = object : ContextWrapper(null) {
+            override fun getFilesDir(): File = temporaryFolder.root
+        }
+        val legacy = File(temporaryFolder.root, "maneuver_hash_table.tsv")
+        legacy.writeText("1234\t1\n")
+        ManeuverMap.resetForTest()
+        try {
+            ManeuverMap.initPersistence(context)
+            assertNull(ManeuverMap.fromBitmapHash(0x1234L))
+            ManeuverMap.registerBitmapHash(0x1234L, 2)
+            ManeuverMap.resetForTest()
+            ManeuverMap.initPersistence(context)
+            assertEquals(2, ManeuverMap.fromBitmapHash(0x1234L))
+            assertEquals("1234\t1\n", legacy.readText())
+        } finally {
+            ManeuverMap.resetForTest()
+        }
+    }
 
     @Test
     fun `default branch table — straight maneuvers (0_dot_dot_7)`() {
@@ -129,7 +155,7 @@ class ManeuverMapTest {
 
     @Test
     fun `SBS51 BTID triggers Burgman branch regardless of vehicleModel`() {
-        // A0.java:646 + :660 check d.k().contains("SBS51") in addition to the
+        // B0.C() checks for "SBS51" in addition to the
         // vehicle-name set. Any BTID containing that substring takes the
         // Burgman path for Mappls 58 and 74.
         assertEquals(44, ManeuverMap.mapplsIdToClusterByte(58, null, "SBS51-ABC123"))
@@ -161,9 +187,9 @@ class ManeuverMapTest {
     }
 
     @Test
-    fun `Mappls 36 (ferry) returns null — OEM leaves e0 untouched`() {
-        assertNull(ManeuverMap.mapplsIdToClusterByte(36, null))
-        assertNull(ManeuverMap.mapplsIdToClusterByte(36, "Burgman Street-TFT Edition"))
+    fun `Mappls 36 maps to cluster byte 43 for all vehicle branches`() {
+        assertEquals(43, ManeuverMap.mapplsIdToClusterByte(36, null))
+        assertEquals(43, ManeuverMap.mapplsIdToClusterByte(36, "Burgman Street-TFT Edition"))
     }
 
     // ----------------------------------------------------------------
@@ -198,10 +224,17 @@ class ManeuverMapTest {
     }
 
     @Test
-    fun `end-to-end — u-turn yields cluster byte 7`() {
-        val mapplsId = MapplsIdGuesser.fromText("Make a U-turn at the next light")
+    fun `end-to-end — directed u-turns use the matching cluster byte`() {
+        val mapplsId = MapplsIdGuesser.fromTextOrNull("Make a left U-turn at the next light")!!
         assertEquals(6, mapplsId)
         assertEquals(7, ManeuverMap.mapplsIdToClusterByte(mapplsId, null))
+        assertEquals(39, ManeuverMap.mapplsIdToClusterByte(41, "Access"))
+        for (model in listOf(null, "Access")) {
+            val generic = MapplsIdGuesser.fromTextOrNull("Make a U-turn at the next light")!!
+            assertEquals(41, generic)
+            assertEquals(39, ManeuverMap.mapplsIdToClusterByte(generic, model))
+            assertEquals(7, ManeuverMap.mapplsIdToClusterByte(mapplsId, model))
+        }
     }
 
     @Test

@@ -79,8 +79,8 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
             .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     /**
-     * Estimated tank state (litres left, %, range) from the fuel-fill ledger +
-     * current odometer. Uses the measured fill-to-fill avg km/L, falling back to
+     * Estimated tank state, preferring cluster fuel bars over the fill ledger.
+     * Uses the measured fill-to-fill avg km/L, falling back to
      * the bike's live economy then a fixed default. The current odometer is taken
      * from live telemetry, else the persisted last-telemetry snapshot, else the
      * last-known odometer from ride history — so the estimate shows immediately
@@ -101,7 +101,7 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
                 currentOdometerKm = latest?.odometerKm ?: lastTelem?.odometerKm ?: rideOdo,
                 avgKmPerL = MileageAnalytics.averageKmPerL(fills),
                 bikeLiveKmPerL = latest?.fuelEconKmlV2 ?: lastTelem?.kmPerL,
-                bikeFuelBars = latest?.fuelBars ?: lastTelem?.fuelBars,
+                bikeFuelBars = if (latest != null) latest.fuelBars else lastTelem?.fuelBars,
                 capacityL = capacity,
             )
         }.stateIn(viewModelScope, SharingStarted.Eagerly, null)

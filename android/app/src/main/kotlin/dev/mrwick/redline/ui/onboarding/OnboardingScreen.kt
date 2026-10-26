@@ -60,6 +60,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.mrwick.redline.ble.BikeBridgeService
+import dev.mrwick.redline.ble.DiscoveredBike
+import dev.mrwick.redline.ui.settings.SuzukiProfileDialog
 import dev.mrwick.redline.notifications.NotificationCaptureService
 import dev.mrwick.redline.ui.theme.GixxerTokens
 
@@ -323,6 +325,17 @@ private fun PairStep(vm: OnboardingViewModel, onContinue: () -> Unit, onBack: ()
     val results by vm.scanResults.collectAsStateWithLifecycle()
     val bikeMac by vm.bikeMac.collectAsStateWithLifecycle()
     val bikes = results.values.sortedByDescending { it.rssi }
+    var candidate by remember { mutableStateOf<DiscoveredBike?>(null) }
+    candidate?.let { bike ->
+        SuzukiProfileDialog(
+            bike = bike,
+            onDismiss = { candidate = null },
+            onConnect = { model ->
+                vm.pickBike(bike, model)
+                candidate = null
+            },
+        )
+    }
 
     DisposableEffect(Unit) {
         vm.startScan()
@@ -401,7 +414,7 @@ private fun PairStep(vm: OnboardingViewModel, onContinue: () -> Unit, onBack: ()
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable { vm.pickBike(bike) },
+                        .clickable { candidate = bike },
                 ) {
                     Row(
                         modifier = Modifier.padding(16.dp).fillMaxWidth(),
@@ -417,7 +430,7 @@ private fun PairStep(vm: OnboardingViewModel, onContinue: () -> Unit, onBack: ()
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
-                        TextButton(onClick = { vm.pickBike(bike) }) { Text("Pair") }
+                        TextButton(onClick = { candidate = bike }) { Text("Pair") }
                     }
                 }
             }

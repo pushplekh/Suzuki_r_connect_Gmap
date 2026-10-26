@@ -13,9 +13,12 @@ import android.content.Context
 import android.os.Build
 import android.util.Log
 import dev.mrwick.redline.util.AppLog
+import dev.mrwick.redline.protocol.ClusterProtocol
+import dev.mrwick.redline.protocol.isWellFormed
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
@@ -41,7 +44,11 @@ import java.util.concurrent.atomic.AtomicReference
  *   - All Bluetooth* operations require BLUETOOTH_CONNECT runtime permission on API 31+.
  */
 @SuppressLint("MissingPermission") // caller verifies permission before constructing
-class BleClient(private val context: Context) {
+class BleClient(
+    private val context: Context,
+    private val identityProvider: suspend (isFresh: Boolean) -> ByteArray,
+    private val onFrameWritten: (FrameEvent) -> Unit,
+) {
 
     private val tag = "BleClient"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -57,7 +64,8 @@ class BleClient(private val context: Context) {
 
     private val gattRef = AtomicReference<BluetoothGatt?>(null)
     private val writeMutex = Mutex()
-    private val readMutex = Mutex()
+    // Android permits only one outstanding GATT operation, including reads.
+    private val readMutex = writeMutex
     private val pendingWrite = AtomicReference<CompletableDeferred<Boolean>?>(null)
     private val pendingRead = AtomicReference<CompletableDeferred<ByteArray?>?>(null)
     private val pendingDescriptor = AtomicReference<CompletableDeferred<Boolean>?>(null)
@@ -65,6 +73,12 @@ class BleClient(private val context: Context) {
 
     /** Last MAC passed to [connect]; used for bounded handshake-failure reconnects. */
     @Volatile private var lastMac: String? = null
+    @Volatile private var lastName: String? = null
+    @Volatile var protocol: ClusterProtocol = ClusterProtocol.STANDARD
+        private set
+    private var identified = false
+    private var sessionJob: Job? = null
+    @Volatile private var endpoints: SuzukiGatt.Endpoints? = null
     /** Consecutive handshake failures for the current MAC; reset on Ready / MAC change. */
     private var handshakeFailCount = 0
     private val maxHandshakeReconnects = 3
@@ -76,12 +90,16 @@ class BleClient(private val context: Context) {
      * Start a connection attempt to the given MAC. Returns immediately; observe `state` for progress.
      * Safe to call repeatedly — second call disconnects the previous attempt first.
      */
-    fun connect(mac: String) {
+    fun connect(mac: String, name: String? = null) {
         // Reset the handshake-failure budget only when the *target* changes, so
         // an internal reconnect (same MAC) keeps counting toward the cap instead
         // of looping forever.
-        if (mac != lastMac) handshakeFailCount = 0
+        if (mac != lastMac) {
+            handshakeFailCount = 0
+            identified = false
+        }
         lastMac = mac
+        lastName = name
         AppLog.i(tag, "connect() mac=$mac")
         scope.launch {
             disconnectInternal()
@@ -97,6 +115,13 @@ class BleClient(private val context: Context) {
                 _state.value = ConnectionState.Failed("Bluetooth adapter unavailable")
                 return@launch
             }
+            val clusterName = name ?: device.name
+            val selectedProtocol = ClusterProtocol.fromClusterName(clusterName)
+            protocol = selectedProtocol ?: ClusterProtocol.STANDARD
+            if (selectedProtocol == null) {
+                AppLog.w(tag, "Unrecognized cluster name=$clusterName; retaining standard protocol compatibility")
+            }
+            AppLog.i(tag, "cluster protocol=$protocol")
             AppLog.i(tag, "connectGatt autoConnect=true transport=LE bondState=${device.bondState}")
             _state.value = ConnectionState.Connecting
             val gatt = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -137,6 +162,9 @@ class BleClient(private val context: Context) {
     }
 
     private suspend fun disconnectInternal() {
+        sessionJob?.cancel()
+        sessionJob = null
+        endpoints = null
         val gatt = gattRef.getAndSet(null) ?: return
         try {
             gatt.disconnect()
@@ -166,7 +194,7 @@ class BleClient(private val context: Context) {
             scope.launch {
                 disconnectInternal()
                 delay(backoff)
-                connect(mac)
+                connect(mac, lastName)
             }
         } else {
             AppLog.e(tag, "handshake failed ($reason) — giving up after $handshakeFailCount retries")
@@ -175,13 +203,13 @@ class BleClient(private val context: Context) {
     }
 
     /**
-     * Write a 30-byte frame to 0xFFF1.
+     * Write a 30-byte frame to the discovered vendor write characteristic.
      * Returns true on success (or false on timeout/failure).
      * Suspends until onCharacteristicWrite or 2s timeout. Serializes writes via mutex.
      */
-    suspend fun write(frame: ByteArray): Boolean {
-        if (frame.size != 30) {
-            AppLog.w(tag, "write: expected 30 bytes, got ${frame.size}")
+    suspend fun write(frame: ByteArray, note: String? = null): Boolean {
+        if (!isWellFormed(frame)) {
+            AppLog.w(tag, "write: invalid canonical frame (size=${frame.size})")
             return false
         }
         return writeMutex.withLock {
@@ -189,11 +217,19 @@ class BleClient(private val context: Context) {
                 AppLog.w(tag, "write: no gatt (state=${_state.value})")
                 return@withLock false
             }
-            val characteristic = gatt.getService(SuzukiGatt.SERVICE_UUID)
-                ?.getCharacteristic(SuzukiGatt.WRITE_CHAR_UUID) ?: run {
-                AppLog.w(tag, "write: 0xFFF1 characteristic missing")
+            val selectedProtocol = protocol
+            val wire = selectedProtocol.toWire(frame)
+            val selected = endpoints ?: run {
+                AppLog.w(tag, "write: Suzuki endpoints have not been discovered")
                 return@withLock false
             }
+            val characteristic = gatt.getService(selected.service)
+                ?.getCharacteristic(selected.write) ?: run {
+                AppLog.w(tag, "write: discovered characteristic ${selected.write} missing")
+                return@withLock false
+            }
+            val writeType = if (selected.writeWithResponse) BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                else BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
 
             val deferred = CompletableDeferred<Boolean>()
             val typeHex = "0x${"%02x".format(frame[1].toInt() and 0xFF)}"
@@ -214,15 +250,15 @@ class BleClient(private val context: Context) {
                 pendingWrite.set(deferred)
                 val startedOk: Boolean = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     val code = gatt.writeCharacteristic(
-                        characteristic, frame, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT,
+                        characteristic, wire, writeType,
                     )
                     lastCode = code
                     code == android.bluetooth.BluetoothStatusCodes.SUCCESS
                 } else {
                     @Suppress("DEPRECATION")
-                    characteristic.value = frame
+                    characteristic.value = wire
                     @Suppress("DEPRECATION")
-                    characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                    characteristic.writeType = writeType
                     @Suppress("DEPRECATION")
                     val r = gatt.writeCharacteristic(characteristic)
                     lastBool = r
@@ -250,7 +286,9 @@ class BleClient(private val context: Context) {
                 pendingWrite.set(null)
                 false
             }
-            if (result) AppLog.d(tag, "write ok type=0x${"%02x".format(frame[1].toInt() and 0xFF)}")
+            if (result) {
+                onFrameWritten(FrameEvent(FrameEvent.Direction.TX, wire, note = note, protocol = selectedProtocol))
+            }
             result
         }
     }
@@ -270,9 +308,8 @@ class BleClient(private val context: Context) {
      *      write was still in flight — Android allows only one outstanding GATT op.
      *      The bike never saw a536, sat in pairing mode, and dropped the link after
      *      ~30 s (observed CONN_TIMEOUT status=8 in the diag log).
-     *   5. Mark Ready → BikeBridgeService's state collector enqueues identity, which
-     *      now drains cleanly because the GATT queue is empty.
-     *   6. Kick off the optional Device Info (0x180A) reads in the background.
+     *   5. Write identity with the selected wire checksum and wait for GATT completion.
+     *   6. Mark Ready, then read optional Device Info using the same GATT mutex.
      */
     private suspend fun runHandshake(gatt: BluetoothGatt) {
         // (1) MTU. Request 65 to match the Server Rx MTU seen in the M0 pcap.
@@ -300,23 +337,25 @@ class BleClient(private val context: Context) {
         // (2) Quiet gap. Matches Suzuki app's postDelayed(500) before subscribing.
         delay(500)
 
-        // (3) Subscribe to 0xFFF2 notify + write CCC = ENABLE_NOTIFICATION.
-        val notifyChar = gatt.getService(SuzukiGatt.SERVICE_UUID)
-            ?.getCharacteristic(SuzukiGatt.NOTIFY_CHAR_UUID)
+        val selected = endpoints ?: run {
+            failHandshake("Suzuki endpoints not discovered")
+            return
+        }
+        val notifyChar = gatt.getService(selected.service)
+            ?.getCharacteristic(selected.notify)
         if (notifyChar == null) {
-            AppLog.e(tag, "notify characteristic 0xFFF2 missing")
-            failHandshake("notify characteristic 0xFFF2 missing")
+            failHandshake("discovered notify characteristic ${selected.notify} missing")
             return
         }
         val enabled = gatt.setCharacteristicNotification(notifyChar, true)
-        AppLog.i(tag, "setCharacteristicNotification(0xFFF2)=$enabled")
+        AppLog.i(tag, "setCharacteristicNotification(${selected.notify})=$enabled")
         if (!enabled) {
             failHandshake("setCharacteristicNotification failed")
             return
         }
         val ccc = notifyChar.getDescriptor(SuzukiGatt.CCC_DESCRIPTOR_UUID)
         if (ccc == null) {
-            AppLog.e(tag, "CCC descriptor missing on 0xFFF2; cannot enable notify")
+            AppLog.e(tag, "CCC descriptor missing on ${selected.notify}; cannot enable notify")
             failHandshake("CCC descriptor missing")
             return
         }
@@ -326,17 +365,19 @@ class BleClient(private val context: Context) {
         // congested stack right after discovery, and a single miss used to wedge
         // the connection permanently (now a bounded reconnect catches the rest).
         var cccOk = false
+        val cccValue = if (selected.indicate) BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
+            else BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
         for (cccAttempt in 1..3) {
             val descDeferred = CompletableDeferred<Boolean>()
             pendingDescriptor.set(descDeferred)
             val cccStarted = try {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     @Suppress("DEPRECATION")
-                    gatt.writeDescriptor(ccc, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) ==
+                    gatt.writeDescriptor(ccc, cccValue) ==
                         android.bluetooth.BluetoothStatusCodes.SUCCESS
                 } else {
                     @Suppress("DEPRECATION")
-                    ccc.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                    ccc.value = cccValue
                     @Suppress("DEPRECATION")
                     gatt.writeDescriptor(ccc)
                 }
@@ -361,14 +402,18 @@ class BleClient(private val context: Context) {
         }
         AppLog.i(tag, "CCC notify-enable ack received — handshake clear to send")
 
-        // (5) Mark Ready. BikeBridgeService's state collector reacts immediately by
-        // enqueueing the a536 identity frame to URGENT, which the drain writes next.
+        // Complete identity before exposing Ready to heartbeat/nav producers or device-info reads.
+        if (!write(identityProvider(!identified), note = "identity")) {
+            failHandshake("identity write failed")
+            return
+        }
+        identified = true
         handshakeFailCount = 0
         _state.value = ConnectionState.Ready
-        AppLog.i(tag, "Ready — bike connected and notify subscription armed")
+        AppLog.i(tag, "Ready — identity GATT write completed, notify subscription armed, protocol=$protocol; display acceptance not confirmed")
 
         // (6) Background device-info read.
-        scope.launch { readDeviceInfo(gatt) }
+        readDeviceInfo(gatt)
     }
 
     /**
@@ -438,6 +483,7 @@ class BleClient(private val context: Context) {
     private val callback = object : BluetoothGattCallback() {
 
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+            if (gatt !== gattRef.get()) return
             val nState = when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> "CONNECTED"
                 BluetoothProfile.STATE_DISCONNECTED -> "DISCONNECTED"
@@ -453,6 +499,7 @@ class BleClient(private val context: Context) {
                     AppLog.i(tag, "discoverServices started=$ok")
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
+                    sessionJob?.cancel()
                     _state.value = ConnectionState.Disconnected(status)
                     AppLog.w(tag, "disconnected (autoConnect will retry); status=$status (${gattStatusName(status)})")
                 }
@@ -460,6 +507,7 @@ class BleClient(private val context: Context) {
         }
 
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+            if (gatt !== gattRef.get()) return
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 AppLog.e(tag, "service discovery failed status=$status (${gattStatusName(status)})")
                 failHandshake("service discovery failed status=$status")
@@ -467,16 +515,37 @@ class BleClient(private val context: Context) {
             }
             val services = gatt.services.joinToString(", ") { it.uuid.toString().substring(0, 8) }
             AppLog.i(tag, "services discovered (${gatt.services.size}): $services")
+            val inventory = gatt.services.map { service ->
+                SuzukiGatt.Service(service.uuid, service.characteristics.map { characteristic ->
+                    val hasCcc = characteristic.getDescriptor(SuzukiGatt.CCC_DESCRIPTOR_UUID) != null
+                    AppLog.i(
+                        tag,
+                        "GATT service=${service.uuid} char=${characteristic.uuid} " +
+                            "properties=0x${characteristic.properties.toString(16)} ccc=$hasCcc",
+                    )
+                    SuzukiGatt.Characteristic(characteristic.uuid, characteristic.properties, hasCcc)
+                })
+            }
+            endpoints = try {
+                SuzukiGatt.resolve(inventory)
+            } catch (e: IllegalArgumentException) {
+                AppLog.e(tag, "Unsupported Suzuki GATT layout: ${e.message}")
+                _state.value = ConnectionState.Failed(e.message ?: "Unsupported Suzuki GATT layout")
+                return
+            }
+            AppLog.i(tag, "selected GATT endpoints=$endpoints protocol=$protocol")
             // Drive the rest of the handshake on our scope so we can `delay` and `await`
             // the descriptor/MTU callbacks. The Suzuki Connect APK does exactly this
             // sequence (see DISCOVERIES.md 2026-05-24 "Connection handshake fully
             // mapped") and the captured pcap (captures/m0-pairing-and-first-nav…)
             // confirms the order: MTU exchange → ~500ms gap → CCC write → wait for
             // ack → identity (a536) write → bike streams a537.
-            scope.launch { runHandshake(gatt) }
+            sessionJob?.cancel()
+            sessionJob = scope.launch { runHandshake(gatt) }
         }
 
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+            if (gatt !== gattRef.get()) return
             AppLog.i(tag, "onMtuChanged mtu=$mtu status=$status (${gattStatusName(status)})")
             pendingMtu.getAndSet(null)?.complete(if (status == BluetoothGatt.GATT_SUCCESS) mtu else -1)
         }
@@ -484,17 +553,23 @@ class BleClient(private val context: Context) {
         @Deprecated("Pre-Tiramisu API")
         @Suppress("OVERRIDE_DEPRECATION")
         override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
+            if (gatt !== gattRef.get()) return
             AppLog.d(tag, "onDescriptorWrite uuid=${descriptor.uuid} status=$status (${gattStatusName(status)})")
             pendingDescriptor.getAndSet(null)?.complete(status == BluetoothGatt.GATT_SUCCESS)
         }
 
         override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
+            if (gatt !== gattRef.get()) return
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                AppLog.w(tag, "onCharacteristicWrite status=$status (${gattStatusName(status)})")
+            }
             pendingWrite.getAndSet(null)?.complete(status == BluetoothGatt.GATT_SUCCESS)
         }
 
         @Deprecated("Pre-Tiramisu API")
         @Suppress("OVERRIDE_DEPRECATION")
         override fun onCharacteristicRead(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
+            if (gatt !== gattRef.get()) return
             @Suppress("DEPRECATION")
             val bytes = characteristic.value
             val ok = status == BluetoothGatt.GATT_SUCCESS && bytes != null
@@ -507,6 +582,7 @@ class BleClient(private val context: Context) {
             value: ByteArray,
             status: Int,
         ) {
+            if (gatt !== gattRef.get()) return
             val ok = status == BluetoothGatt.GATT_SUCCESS
             pendingRead.getAndSet(null)?.complete(if (ok) value.copyOf() else null)
         }
@@ -514,14 +590,16 @@ class BleClient(private val context: Context) {
         @Deprecated("Pre-Tiramisu API")
         @Suppress("OVERRIDE_DEPRECATION")
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
-            if (characteristic.uuid == SuzukiGatt.NOTIFY_CHAR_UUID) {
+            if (gatt !== gattRef.get()) return
+            if (characteristic.uuid == endpoints?.notify && characteristic.service?.uuid == endpoints?.service) {
                 @Suppress("DEPRECATION")
                 characteristic.value?.let { _notifications.tryEmit(it.copyOf()) }
             }
         }
 
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray) {
-            if (characteristic.uuid == SuzukiGatt.NOTIFY_CHAR_UUID) {
+            if (gatt !== gattRef.get()) return
+            if (characteristic.uuid == endpoints?.notify && characteristic.service?.uuid == endpoints?.service) {
                 _notifications.tryEmit(value.copyOf())
             }
         }

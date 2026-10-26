@@ -5,8 +5,8 @@ import dev.mrwick.redline.data.FuelFillEntity
 /**
  * Estimated tank state: litres remaining, fill fraction, and resulting range.
  *
- * [isRough] is true for the pre-first-fill bootstrap (derived from the bike's
- * coarse 6-bar gauge rather than the fill ledger).
+ * [isRough] is true when derived from the bike's coarse 6-bar gauge rather than
+ * the fill ledger. Neither source measures litres directly.
  */
 data class FuelEstimate(
     val litresLeft: Double,
@@ -17,10 +17,10 @@ data class FuelEstimate(
 )
 
 /**
- * Estimates litres remaining in the tank + range, from the manual fuel-fill log
- * and the current odometer.
+ * Estimates litres remaining + range, preferring the cluster's current gauge.
+ * Bar-to-litre conversion is a linear approximation, not a calibrated sensor.
  *
- * Model: the rider always fills to full, so the most-recent fill re-anchors the
+ * Without a valid gauge reading, assume the rider fills to full: the latest fill re-anchors the
  * tank to [capacityL]. We subtract litres consumed since that fill, where
  * consumed = (current odo - fill odo) / km-per-L. The km/L used is the measured
  * fill-to-fill average ([MileageAnalytics.averageKmPerL]); callers pass bike-live
@@ -49,6 +49,12 @@ object FuelTankEstimator {
         val kmPerL = listOfNotNull(avgKmPerL, bikeLiveKmPerL).firstOrNull { it > 0.0 } ?: fallbackKmPerL
         if (kmPerL <= 0.0 || kmPerL.isNaN()) return null
 
+        val bars = bikeFuelBars?.takeIf { it in 0..6 }
+        if (bars != null) {
+            val litres = bars / FUEL_BARS_MAX * capacityL
+            return FuelEstimate(litres, litres / capacityL, litres * kmPerL, kmPerL, isRough = true)
+        }
+
         val anchor = fills.maxByOrNull { it.tMillis }
         if (anchor != null && currentOdometerKm != null) {
             val kmSince = (currentOdometerKm - anchor.odometerKm).coerceAtLeast(0)
@@ -56,10 +62,6 @@ object FuelTankEstimator {
             return FuelEstimate(litres, litres / capacityL, litres * kmPerL, kmPerL, isRough = false)
         }
 
-        // Cold-start: no fills (or no odometer yet) -> rough bars->litres bootstrap.
-        val bars = bikeFuelBars ?: return null
-        if (bars < 0) return null
-        val litres = ((bars / FUEL_BARS_MAX) * capacityL).coerceIn(0.0, capacityL)
-        return FuelEstimate(litres, litres / capacityL, litres * kmPerL, kmPerL, isRough = true)
+        return null
     }
 }

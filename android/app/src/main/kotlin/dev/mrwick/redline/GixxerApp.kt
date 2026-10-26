@@ -20,7 +20,7 @@ class GixxerApp : Application() {
         CrashHandler.install(this)
         AppLog.init(this)
         dev.mrwick.redline.app.AppGraph.frameStream.init(this)
-        AppLog.i("App", "onCreate pid=${android.os.Process.myPid()} pkg=$packageName")
+        AppLog.i("App", "onCreate pid=${android.os.Process.myPid()} ${dev.mrwick.redline.util.BuildIdentity.summary}")
         registerNotificationChannels()
     }
 

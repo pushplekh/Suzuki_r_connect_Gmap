@@ -28,14 +28,18 @@ import dev.mrwick.redline.data.RideStore
 import dev.mrwick.redline.data.Settings
 import dev.mrwick.redline.location.RideLocationTracker
 import dev.mrwick.redline.nav.IdleClockGenerator
-// PARKED: Google Maps nav shelved — MapsNavSource no longer wired into NavMux.
-// import dev.mrwick.redline.nav.MapsNavSource
+import dev.mrwick.redline.nav.MapsNavSource
+import dev.mrwick.redline.nav.NavDiagnostics
 import dev.mrwick.redline.nav.NavMux
 import dev.mrwick.redline.nav.WelcomeFrame
 import dev.mrwick.redline.notifications.NowPlayingProvider
+import dev.mrwick.redline.notifications.CallAlerts
+import dev.mrwick.redline.protocol.CallFrame
+import dev.mrwick.redline.protocol.MissedCallFrame
 import dev.mrwick.redline.protocol.IdentityFrame
+import dev.mrwick.redline.protocol.PairedSuzuki
+import dev.mrwick.redline.protocol.NavFrame
 import dev.mrwick.redline.protocol.TelemetryFrame
-import dev.mrwick.redline.protocol.decodeFrame
 import dev.mrwick.redline.safety.CrashDetector
 import dev.mrwick.redline.safety.SosAlarmReceiver
 import dev.mrwick.redline.safety.SosController
@@ -54,10 +58,12 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -126,7 +132,13 @@ class BikeBridgeService : LifecycleService() {
 
         settings = Settings(applicationContext)
         greetings = Greetings(applicationContext)
-        bleClient = BleClient(applicationContext)
+        bleClient = BleClient(
+            applicationContext,
+            identityProvider = { isFresh ->
+                IdentityFrame(name = settings.riderName.first(), isFresh = isFresh).encode()
+            },
+            onFrameWritten = { event -> AppGraph.frameStream.emit(event) },
+        )
 
         // Keep the foreground notification text in sync with the connection lifecycle so
         // the user can glance at the shade and know whether the bike link is live. Tapping
@@ -139,6 +151,13 @@ class BikeBridgeService : LifecycleService() {
         }
         frameWriter = FrameWriter()
         phoneState = PhoneState(applicationContext).also { it.start() }
+        lifecycleScope.launch {
+            while (isActive) {
+                bleClient.state.first { it is ConnectionState.Ready }
+                AppLog.i("RuntimeState", "sample ${phoneState.diagnosticSummary()}")
+                delay(60_000)
+            }
+        }
         idleClock = IdleClockGenerator()
         nowPlayingProvider = NowPlayingProvider(applicationContext)
         dnd = DndController(applicationContext)
@@ -155,12 +174,10 @@ class BikeBridgeService : LifecycleService() {
         heartbeatLoop = HeartbeatLoop(
             phoneBatteryProvider = { phoneState.batteryPercent.value to phoneState.isCharging.value },
             signalBarsProvider = { phoneState.signalBars.value },
-            // Default false → a533 SMS/Call bytes behave as before. The debug
-            // toggles (DeveloperSettings) flip these live so we can characterize
-            // the white "i" LED on-bike. Will be wired to real notification state
-            // once the LED semantics are confirmed.
+            // SMS remains a manual probe. For calls the OEM uses Y when cleared;
+            // the debug switch can force Y. Physical LED behavior is unverified.
             smsPendingProvider = { AppGraph.debugSmsPending },
-            callPendingProvider = { AppGraph.debugCallPending },
+            callPendingProvider = { AppGraph.debugCallPending || CallAlerts.tracker.state.value.cleared },
             weatherProvider = { weatherCache.currentEncoded() },
         )
 
@@ -181,9 +198,9 @@ class BikeBridgeService : LifecycleService() {
             }
         }
 
-        // NavMux normally muxes Maps nav over the idle clock, but Maps nav is
-        // PARKED (2026-06-04) — the maps slot is fed constant-null below, so only
-        // the idle producer reaches the cluster.
+        // NavMux prefers live Maps navigation over the idle display. When the
+        // Maps notification clears, the idle producer resumes. The display flow
+        // below overrides idle with a warning after stale guidance expires.
         //
         // Idle producer rotates every CYCLE_SECONDS=5 ticks (= 5s @ 1Hz):
         //   slot CLOCK      -> clock + weather (always present)
@@ -212,14 +229,15 @@ class BikeBridgeService : LifecycleService() {
         val rangeOnClusterFlow: StateFlow<Boolean> = settings.rangeOnCluster
             .stateIn(lifecycleScope, SharingStarted.Eagerly, false)
 
-        val idleProducer = kotlinx.coroutines.flow.flow {
+        val idleProducer = kotlinx.coroutines.flow.flow<NavFrame?> {
             var tick = 0
             while (true) {
                 // Respect the rider's "Show clock + weather when nav idle" toggle.
-                // When off, emit nothing so the cluster keeps its native idle
+                // When off, publish null so the cluster keeps its native idle
                 // screen — and so dev tools (maneuver sweep) get a clean a531
                 // channel that isn't overwritten every second.
                 if (!settings.idleClockEnabled.first()) {
+                    emit(null)
                     delay(1_000)
                     tick++
                     continue
@@ -258,14 +276,7 @@ class BikeBridgeService : LifecycleService() {
                 tick++
             }
         }
-        // PARKED (2026-06-04): Google Maps navigation is shelved. The
-        // notification-scrape -> guessed-Mappls-ID pipeline produced wrong
-        // cluster arrows, so we feed NavMux a constant-null maps slot and it
-        // always falls through to the idle clock (clock / weather / now-playing
-        // are unaffected). To revive: pass `MapsNavSource.frame` here again and
-        // re-enable the Maps branch in NotificationDispatcher. The planned
-        // replacement drives nav from the Mappls Navigation SDK instead.
-        navMux = NavMux(kotlinx.coroutines.flow.flowOf(null), idleProducer)
+        navMux = NavMux(MapsNavSource.frame, idleProducer)
 
         AppGraph.bleClient = bleClient
         AppGraph.frameWriter = frameWriter
@@ -332,7 +343,9 @@ class BikeBridgeService : LifecycleService() {
         // Telemetry sink: every notify byte[] -> try-decode -> TelemetryRepository
         lifecycleScope.launch {
             bleClient.notifications.collect { bytes ->
-                AppGraph.frameStream.emit(FrameEvent(FrameEvent.Direction.RX, bytes))
+                AppGraph.frameStream.emit(
+                    FrameEvent(FrameEvent.Direction.RX, bytes, protocol = bleClient.protocol),
+                )
                 // Diag-log every notify so the user can see if real bike telemetry is
                 // arriving (vs demo source). Log just the type byte + size to keep it
                 // skim-friendly in the Diagnostics screen.
@@ -349,8 +362,20 @@ class BikeBridgeService : LifecycleService() {
                     AppEvents.emit(AppEvent.DemoModeAutoDisabled)
                 }
                 try {
-                    val frame = decodeFrame(bytes)
-                    if (frame is TelemetryFrame) TelemetryRepository.update(frame)
+                    val frame = bleClient.protocol.decode(bytes)
+                    if (frame is TelemetryFrame) {
+                        AppLog.i(
+                            "ClusterTrace",
+                            "CLUSTER_TO_APP source=BLE_RX type=a537 protocol=${bleClient.protocol} " +
+                                "speedKmh=${frame.speedKmh} odometerKm=${frame.odometerKm} " +
+                                "tripAKm=${frame.tripAKm} tripBKm=${frame.tripBKm} fuelBars=${frame.fuelBars} " +
+                                "capacityLitres=${settings.fuelCapacityL.first()} capacitySource=app-settings-not-cluster " +
+                                "fuelLitresMeasured=false displayAcknowledgement=false",
+                        )
+                        TelemetryRepository.update(frame)
+                    } else {
+                        AppLog.i("ClusterTrace", "CLUSTER_TO_APP source=BLE_RX type=$typeHex decoded=${frame.javaClass.simpleName} displayAcknowledgement=unverified")
+                    }
                 } catch (t: Throwable) {
                     // Don't swallow silently: an undecoded notify may be a new/unknown
                     // bike frame type worth investigating (project rule — absence of
@@ -360,7 +385,7 @@ class BikeBridgeService : LifecycleService() {
             }
         }
 
-        // On Ready: send identity, fire one-shot welcome frame, flip DND.
+        // Identity is acknowledged inside BleClient before Ready. Then welcome + DND.
         // On Disconnected: restore the user's previous DND filter.
         //
         // "Fresh" is defined as: this Ready transition wasn't immediately preceded
@@ -378,11 +403,6 @@ class BikeBridgeService : LifecycleService() {
                         lastWasReady = true
 
                         val name = settings.riderName.first()
-                        val identity = IdentityFrame(name = name, isFresh = isFresh).encode()
-                        frameWriter.enqueue(
-                            FrameWriter.Entry(FrameWriter.Priority.URGENT, identity, "identity"),
-                        )
-
                         if (isFresh) {
                             // Welcome a531 — pick a random user-defined greeting
                             // (with {name} substitution). NavMux supersedes on
@@ -426,15 +446,15 @@ class BikeBridgeService : LifecycleService() {
         }
 
         // Persist a last-telemetry snapshot (odo / bars / km-L) so the Home fuel
-        // estimate works while the bike is disconnected. Throttled to odometer
-        // changes - the odo advances ~once/km, so this writes a few times/min at
-        // most, not at the 1 Hz telemetry cadence.
+        // estimate works offline. Save fuel changes even at an unchanged odometer.
         lifecycleScope.launch {
             var lastPersistedOdo = -1
+            var lastPersistedBars: Int? = null
             TelemetryRepository.latest.collect { frame ->
                 if (frame == null) return@collect
-                if (frame.odometerKm != lastPersistedOdo) {
+                if (frame.odometerKm != lastPersistedOdo || frame.fuelBars != lastPersistedBars) {
                     lastPersistedOdo = frame.odometerKm
+                    lastPersistedBars = frame.fuelBars
                     settings.setLastTelemetry(
                         odometerKm = frame.odometerKm,
                         fuelBars = frame.fuelBars,
@@ -471,6 +491,31 @@ class BikeBridgeService : LifecycleService() {
             }
         }
 
+        // Replay current call state on reconnect; never replay ended ringing events.
+        lifecycleScope.launch {
+            combine(CallAlerts.tracker.state, bleClient.state) { alerts, link -> alerts to link }
+                .collectLatest { (alerts, link) ->
+                    if (link !is ConnectionState.Ready || alerts.frames.isEmpty()) return@collectLatest
+                    alerts.sendBurst { frame ->
+                        val bytes = when (frame) {
+                            is CallFrame -> frame.encode()
+                            is MissedCallFrame -> frame.encode()
+                            else -> error("Unexpected call alert frame")
+                        }
+                        val completion = kotlinx.coroutines.CompletableDeferred<Boolean>()
+                        if (frameWriter.enqueue(FrameWriter.Entry(
+                                FrameWriter.Priority.URGENT, bytes,
+                                note = "call-alert type=${frame.javaClass.simpleName}",
+                                completion = completion, callAlertRevision = alerts.revision,
+                            ))
+                        ) {
+                            val ok = completion.await()
+                            AppLog.i("CallAlerts", "WRITE revision=${alerts.revision} type=${frame.javaClass.simpleName} localGattSuccess=$ok displayAcceptance=unobserved")
+                        }
+                    }
+                }
+        }
+
         // Heartbeat producer -> writer queue.
         // PERF (battery): fully idle-gate. The old code ran HeartbeatLoop at 1 Hz
         // unconditionally and only dropped frames at enqueue, so it kept building a
@@ -486,25 +531,118 @@ class BikeBridgeService : LifecycleService() {
             }
         }
 
-        // Nav producer -> writer queue (only when changed; FrameWriter dedupes by content)
-        // PERF: gate the BLE write on Ready — NavMux keeps producing (idle clock
-        // ticks forward locally), but we don't push to the radio when the link
-        // can't deliver.
-        // UX: always publish to FrameStream as a preview-TX event so the in-app
-        // cluster preview / Inspector see what we WOULD send even when no bike
-        // is connected. Without this the preview is silent on first launch
-        // before pairing, which looks broken.
+        val currentNav = dev.mrwick.redline.nav.navigationDisplayFlow(
+            navMux.frame,
+            dev.mrwick.redline.nav.MapsNavSource.parsed,
+            settings.navigationTextInEta,
+            dev.mrwick.redline.nav.MapsNavSource.freshness,
+        ).onEach { rendered ->
+            if (rendered?.traceId != null) {
+                AppLog.i("NavTrace", "DISPLAY trace=${rendered.traceId} field=eta value=${NavDiagnostics.quoted(rendered.eta)} " +
+                    "next=${NavDiagnostics.quoted(rendered.distNext)} unit=${NavDiagnostics.quoted(rendered.distNextUnit)} " +
+                    "nextFieldPolicy=NOW-only-for-exit-without-distance totalDistancePreserved=true displayAcceptance=unobserved")
+            }
+        }.stateIn(lifecycleScope, SharingStarted.Eagerly, null)
         lifecycleScope.launch {
-            Log.i(tag, "nav producer collector starting")
-            navMux.frame.distinctUntilChanged().collect { nav ->
-                val bytes = nav.encode()
-                val ready = bleClient.state.value is ConnectionState.Ready
-                Log.i(tag, "nav frame: maneuver=${nav.maneuverId} dist=${nav.distNext}${nav.distNextUnit} ready=$ready")
-                if (ready) {
-                    frameWriter.enqueue(FrameWriter.Entry(FrameWriter.Priority.NAV, bytes, "nav"))
-                } else {
+            var lastText: String? = null
+            var replacedIdentity = false
+            kotlinx.coroutines.flow.combine(
+                kotlinx.coroutines.flow.combine(settings.experimentalInstructionText, settings.navigationTextInEta) { banner, text ->
+                    banner && !text
+                },
+                dev.mrwick.redline.nav.MapsNavSource.parsed,
+                bleClient.state,
+            ) { enabled, parsed, state ->
+                Triple(enabled, parsed, state is ConnectionState.Ready)
+            }.collect { (enabled, parsed, ready) ->
+                if (!ready) {
+                    lastText = null
+                    replacedIdentity = false
+                    return@collect
+                }
+                val text = if (enabled) dev.mrwick.redline.nav.clusterInstructionText(parsed) else null
+                if (text != null && text != lastText) {
+                    val accepted = frameWriter.enqueue(
+                        FrameWriter.Entry(
+                            FrameWriter.Priority.URGENT,
+                            IdentityFrame(name = text, isFresh = false).encode(),
+                            note = "experimental-nav-text trace=${parsed?.traceId}",
+                        ),
+                    )
+                    AppLog.i(
+                        "NavTrace",
+                        "TEXT_EXPERIMENT trace=${parsed?.traceId} field=identity-name text=${NavDiagnostics.quoted(text)} " +
+                            "queued=$accepted displayAcceptance=unobserved connectedSuffixPossible=true",
+                    )
+                    if (accepted) {
+                        lastText = text
+                        replacedIdentity = true
+                    }
+                } else if (text == null && replacedIdentity) {
+                    val accepted = frameWriter.enqueue(
+                        FrameWriter.Entry(
+                            FrameWriter.Priority.URGENT,
+                            IdentityFrame(name = settings.riderName.first(), isFresh = false).encode(),
+                            note = "experimental-nav-text-restore",
+                        ),
+                    )
+                    AppLog.i("NavTrace", "TEXT_EXPERIMENT restore-rider-name queued=$accepted displayAcceptance=unobserved")
+                    if (accepted) {
+                        lastText = null
+                        replacedIdentity = false
+                    }
+                }
+            }
+        }
+        // Periodic writes match the OEM's refresh model and re-send active nav on reconnect.
+        lifecycleScope.launch {
+            while (isActive) {
+                bleClient.state.first { it is ConnectionState.Ready }
+                currentNav.value?.let { nav ->
+                    frameWriter.enqueue(
+                        FrameWriter.Entry(
+                            FrameWriter.Priority.NAV, nav.encode(),
+                            note = when {
+                                nav.traceId != null -> "nav trace=${nav.traceId}"
+                                nav.eta == "STALE " -> "nav source=stale"
+                                else -> "nav source=idle"
+                            },
+                            repeat = true,
+                            navTraceId = nav.traceId,
+                            navSourceElapsedMs = nav.sourceElapsedMs,
+                        ),
+                    )
+                }
+                delay(1_000)
+            }
+        }
+
+        // Offline preview is explicitly labelled; it is not evidence of radio delivery.
+        lifecycleScope.launch {
+            currentNav.collect { nav ->
+                AppLog.i(
+                    "NavTrace",
+                    if (nav == null) "MUX source=none link=${bleClient.state.value}"
+                    else "MUX source=${when {
+                        nav.traceId != null -> "maps"
+                        nav.eta == "STALE " -> "stale"
+                        else -> "idle"
+                    }} ${NavDiagnostics.fields(nav)} link=${bleClient.state.value}",
+                )
+                if (nav != null && bleClient.state.value !is ConnectionState.Ready) {
                     AppGraph.frameStream.emit(
-                        FrameEvent(FrameEvent.Direction.TX, bytes, note = "nav-preview"),
+                        FrameEvent(FrameEvent.Direction.TX, nav.encode(), note = "nav-preview"),
+                    )
+                } else if (nav != null) {
+                    // Do not wait for the next periodic tick at short turns or arrival.
+                    frameWriter.enqueue(
+                        FrameWriter.Entry(
+                            FrameWriter.Priority.NAV, nav.encode(),
+                            note = if (nav.traceId != null) "nav trace=${nav.traceId}" else "nav source=idle",
+                            repeat = true,
+                            navTraceId = nav.traceId,
+                            navSourceElapsedMs = nav.sourceElapsedMs,
+                        ),
                     )
                 }
             }
@@ -516,6 +654,7 @@ class BikeBridgeService : LifecycleService() {
         // (which returns false fast). Producers above are also gated, so this
         // mostly catches in-flight frames enqueued just before a disconnect.
         lifecycleScope.launch {
+            var lastLoggedTrace: String? = null
             while (true) {
                 val entry = frameWriter.take()
                 if (bleClient.state.value !is ConnectionState.Ready) {
@@ -531,13 +670,56 @@ class BikeBridgeService : LifecycleService() {
                     }
                     if (bleClient.state.value !is ConnectionState.Ready) {
                         AppLog.d(tag, "writer: dropping stale ${entry.note} (link not Ready after ${waitedMs}ms)")
+                        entry.completion?.complete(false)
                         continue
                     }
                 }
-                val ok = bleClient.write(entry.frame)
-                AppGraph.frameStream.emit(FrameEvent(FrameEvent.Direction.TX, entry.frame, note = entry.note))
+                if (entry.note?.startsWith("display-probe ") == true && !AppGraph.suppressAutomaticDisplay()) {
+                    AppLog.w("DisplayProbe", "DROP expired or superseded test note=${entry.note}")
+                    entry.completion?.complete(false)
+                    continue
+                }
+                if (entry.callAlertRevision != null &&
+                    entry.callAlertRevision != CallAlerts.tracker.state.value.revision
+                ) {
+                    AppLog.i("CallAlerts", "DROP superseded alert revision=${entry.callAlertRevision}")
+                    entry.completion?.complete(false)
+                    continue
+                }
+                if (entry.note?.startsWith("nav ") == true &&
+                    AppGraph.suppressAutomaticDisplay()
+                ) {
+                    AppLog.i("DisplayProbe", "HOLD automatic-display note=${entry.note}; heartbeat remains active")
+                    entry.completion?.complete(false)
+                    continue
+                }
+                if (entry.note?.startsWith("nav ") == true &&
+                    (currentNav.value == null || entry.navTraceId != currentNav.value?.traceId)
+                ) {
+                    AppLog.i("NavTrace", "DROP trace=${entry.navTraceId} reason=superseded-by-new-Maps-update")
+                    entry.completion?.complete(false)
+                    continue
+                }
+                val writeStartedMs = System.nanoTime() / 1_000_000
+                val ok = bleClient.write(entry.frame, note = entry.note)
+                if (entry.frame[1] == dev.mrwick.redline.protocol.FrameType.NAV.code &&
+                    (!ok || entry.navTraceId != lastLoggedTrace)
+                ) {
+                    AppLog.i(
+                        "NavTrace",
+                        "WRITE direction=APP_TO_CLUSTER source=BLE_TX trace=${entry.navTraceId ?: "none"} note=${entry.note} localGattSuccess=$ok " +
+                            "queueMs=${writeStartedMs - entry.queuedElapsedMs} " +
+                            "writeMs=${System.nanoTime() / 1_000_000 - writeStartedMs} " +
+                            "notificationAgeMs=${entry.navSourceElapsedMs?.let { System.nanoTime() / 1_000_000 - it }} " +
+                            "protocol=${bleClient.protocol} displayAcceptance=unobserved",
+                    )
+                    if (ok) lastLoggedTrace = entry.navTraceId
+                }
+                entry.completion?.complete(ok)
                 if (!ok) AppLog.w(tag, "writer: write failed for ${entry.note} (type=0x${"%02x".format(entry.frame[1].toInt() and 0xFF)})")
-                else AppLog.i(tag, "writer: TX ${entry.note} type=0x${"%02x".format(entry.frame[1].toInt() and 0xFF)}")
+                else if (entry.note?.startsWith("nav ") != true && entry.note != "hb") {
+                    AppLog.i(tag, "writer: TX ${entry.note} type=0x${"%02x".format(entry.frame[1].toInt() and 0xFF)}")
+                }
             }
         }
 
@@ -547,10 +729,21 @@ class BikeBridgeService : LifecycleService() {
         // running was silently ignored — the MAC was saved to DataStore but nothing
         // ever connected, and the pair screen looked like a no-op to the user.
         lifecycleScope.launch {
-            settings.bikeMac.distinctUntilChanged().collect { mac ->
+            var previous: PairedSuzuki? = null
+            settings.pairedSuzuki.distinctUntilChanged().collect { cluster ->
+                val old = previous
+                previous = cluster
+                AppLog.i(tag, "Suzuki profile: ${cluster.profile.description}")
+                if (old != null) {
+                    AppLog.i(tag, "Cluster profile changed; waiting for a fresh Maps notification")
+                    MapsNavSource.update(null)
+                }
+                // Navigation model changes do not change the independently detected wire format.
+                if (old != null && old.mac == cluster.mac && old.name == cluster.name) return@collect
+                val (mac, name) = cluster
                 if (mac != null) {
                     AppLog.i(tag, "bikeMac=$mac → bleClient.connect()")
-                    bleClient.connect(mac)
+                    bleClient.connect(mac, name)
                 } else {
                     AppLog.i(tag, "bikeMac cleared → bleClient.disconnect()")
                     bleClient.disconnect()

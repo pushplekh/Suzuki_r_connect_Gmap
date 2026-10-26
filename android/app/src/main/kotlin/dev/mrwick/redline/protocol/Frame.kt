@@ -4,7 +4,7 @@ package dev.mrwick.redline.protocol
  * Shared constants, [FrameType] enum, and low-level helpers for the
  * Suzuki Connect BLE 30-byte frame format.
  *
- * All frames have this layout:
+ * Canonical frames have this layout. [ClusterProtocol] adapts legacy wire checksums.
  *   byte[0]    = 0xA5 (HEADER)
  *   byte[1]    = type byte ('1'-'7' ASCII = 0x31-0x37)
  *   byte[2:28] = body (varies by type)

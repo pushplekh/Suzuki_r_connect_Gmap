@@ -7,6 +7,9 @@ import dev.mrwick.redline.data.Greetings
 import dev.mrwick.redline.data.ServiceItem
 import dev.mrwick.redline.data.ServiceItemState
 import dev.mrwick.redline.data.Settings
+import dev.mrwick.redline.protocol.PairedSuzuki
+import dev.mrwick.redline.protocol.SuzukiModel
+import dev.mrwick.redline.util.AppLog
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -20,6 +23,30 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
         .stateIn(viewModelScope, SharingStarted.Eagerly, Settings.DEFAULT_RIDER_NAME)
     val bikeMac = settings.bikeMac
         .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+    val pairedSuzuki = settings.pairedSuzuki
+        .stateIn(viewModelScope, SharingStarted.Eagerly, PairedSuzuki())
+    val fuelCapacityL = settings.fuelCapacityL
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+    val experimentalInstructionText = settings.experimentalInstructionText
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    val navigationTextInEta = settings.navigationTextInEta
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    fun setNavigationTextInEta(enabled: Boolean) {
+        viewModelScope.launch { settings.setNavigationTextInEta(enabled) }
+    }
+
+    fun setExperimentalInstructionText(enabled: Boolean) {
+        viewModelScope.launch { settings.setExperimentalInstructionText(enabled) }
+    }
+
+    fun setSuzukiModel(model: SuzukiModel) {
+        viewModelScope.launch {
+            AppLog.i("Settings", "Suzuki model selection=$model")
+            settings.setSuzukiModel(model)
+        }
+    }
+
     val autoStartOnBoot = settings.autoStartOnBoot
         .stateIn(viewModelScope, SharingStarted.Eagerly, false)
     val appLockEnabled = settings.appLockEnabled

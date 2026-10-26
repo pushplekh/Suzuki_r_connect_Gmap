@@ -37,7 +37,7 @@ object CrashHandler {
                 val sw = StringWriter()
                 e.printStackTrace(PrintWriter(sw))
                 out.writeText(
-                    "Thread: ${t.name}\nTime: ${Date()}\n\n$sw\n",
+                    "Build: ${BuildIdentity.summary}\nThread: ${t.name}\nTime: ${Date()}\n\n$sw\n",
                 )
             } catch (_: Throwable) {
                 // ASSUMED: best-effort logging — if even the file write fails

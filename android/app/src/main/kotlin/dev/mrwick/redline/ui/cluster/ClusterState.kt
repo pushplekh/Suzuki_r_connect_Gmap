@@ -3,7 +3,6 @@ package dev.mrwick.redline.ui.cluster
 import dev.mrwick.redline.app.AppGraph
 import dev.mrwick.redline.ble.FrameEvent
 import dev.mrwick.redline.protocol.NavFrame
-import dev.mrwick.redline.protocol.decodeFrame
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -34,7 +33,7 @@ object ClusterState {
         }
         .filter { it.direction == FrameEvent.Direction.TX && it.bytes.size == 30 && (it.bytes[1].toInt() and 0xFF) == 0x31 }
         .mapNotNull { ev ->
-            try { (decodeFrame(ev.bytes) as? NavFrame).also { android.util.Log.i(TAG, "decoded NavFrame maneuver=${it?.maneuverId} dist=${it?.distNext}") } } catch (t: Throwable) { android.util.Log.w(TAG, "decode failed: $t"); null }
+            try { (ev.protocol.decode(ev.bytes) as? NavFrame).also { android.util.Log.i(TAG, "decoded NavFrame maneuver=${it?.maneuverId} dist=${it?.distNext}") } } catch (t: Throwable) { android.util.Log.w(TAG, "decode failed: $t"); null }
         }
         .stateIn(
             scope = MainScope(),

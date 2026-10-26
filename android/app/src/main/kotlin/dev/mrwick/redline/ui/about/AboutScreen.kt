@@ -8,9 +8,12 @@ import android.net.Uri
 import android.widget.Toast
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.Color
 import dev.mrwick.redline.ui.theme.GixxerTokens
 import androidx.compose.ui.platform.LocalContext
@@ -36,17 +39,6 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-/**
- * Minimal "About" card: app version, build flavor, package, BLE protocol summary.
- *
- * Two interactive affordances live here:
- *   1. **Long-press the version row** to copy a multi-line diagnostic blob to the
- *      clipboard. Useful when filing bugs without having to retype build IDs.
- *   2. **"Reset all data"** at the bottom — destructive, two-tap confirm. Wipes
- *      every persisted user surface: Settings DataStore, QuickDestinations
- *      DataStore, LastParkedTracker DataStore, and the full ride history Room
- *      DB. Forces a process restart afterwards (user-initiated).
- */
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun AboutScreen() {
@@ -55,7 +47,7 @@ fun AboutScreen() {
     val connectionState by AppGraph.connectionState.collectAsStateWithLifecycle()
 
     Column(
-        modifier = Modifier.fillMaxSize().padding(24.dp),
+        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text("REDLINE", style = MaterialTheme.typography.displaySmall, fontWeight = FontWeight.Bold)
@@ -67,10 +59,6 @@ fun AboutScreen() {
 
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(16.dp)) {
-                // Long-press anywhere on this row to copy diagnostics. We intentionally
-                // make the *whole* version row tappable (not just an icon) because at a
-                // glance there's nothing to suggest the gesture; the long-press is
-                // documented in NOTES.md and surfaced as a Toast on success.
                 KeyValLongPress(
                     k = "Version",
                     v = BuildConfig.VERSION_NAME,
@@ -83,6 +71,8 @@ fun AboutScreen() {
                     },
                 )
                 KeyVal("Build", BuildConfig.BUILD_TYPE)
+                KeyVal("Version code", BuildConfig.VERSION_CODE.toString())
+                KeyVal("Source revision", BuildConfig.SOURCE_FINGERPRINT.take(16))
                 KeyVal("Package", BuildConfig.APPLICATION_ID)
                 KeyVal("Android", "API ${android.os.Build.VERSION.SDK_INT} (${android.os.Build.VERSION.RELEASE})")
                 KeyVal("Device", "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}")
@@ -94,10 +84,6 @@ fun AboutScreen() {
             }
         }
 
-        // "Connected bike" card — only shown once BleClient has read the standard
-        // 0x180A Device Information Service from the bike (happens on first connect).
-        // While we're connected but the DIS read hasn't landed yet, show a
-        // skeleton placeholder so the user sees something is in flight.
         when {
             bikeInfo != null -> ConnectedBikeCard(bikeInfo!!)
             connectionState == ConnectionState.Ready -> ReadingBikeInfoCard()
@@ -124,7 +110,8 @@ fun AboutScreen() {
                 Text("Credits", style = MaterialTheme.typography.titleMedium)
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    "Built by Arjun KR on a 2023 Suzuki Gixxer SF 150. Protocol decoded from " +
+                    "This build is maintained by Pushplekh. Based on the original REDLINE project. " +
+                        "Protocol decoded from " +
                         "decompiled Suzuki Connect APK + HCI snoop captures + a Frida-hooked " +
                         "ride session. No firmware modifications, no bypass of bike-side auth. " +
                         "Personal interoperability project.",
@@ -141,8 +128,14 @@ fun AboutScreen() {
                     },
                     contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp),
                 ) {
-                    Text("View on GitHub", style = MaterialTheme.typography.labelMedium)
+                    Text("Original project on GitHub", style = MaterialTheme.typography.labelMedium)
                 }
+                Text(
+                    "Original author: Arjun KR (mrwick)",
+                    modifier = Modifier.align(Alignment.End),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
 
@@ -426,6 +419,7 @@ private fun copyDiagnostics(
     val text = buildString {
         appendLine("REDLINE v${BuildConfig.VERSION_NAME}")
         appendLine("Build: ${BuildConfig.BUILD_TYPE} · ${BuildConfig.APPLICATION_ID}")
+        appendLine("Source revision: ${BuildConfig.SOURCE_FINGERPRINT}")
         appendLine(
             "Device: ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} · " +
                 "Android ${android.os.Build.VERSION.RELEASE} (API ${android.os.Build.VERSION.SDK_INT})"

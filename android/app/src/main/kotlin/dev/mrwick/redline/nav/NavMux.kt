@@ -4,6 +4,7 @@ import dev.mrwick.redline.protocol.NavFrame
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.onStart
 
 /**
  * Priority mux: prefer the Google Maps frame when present; fall back to the
@@ -14,10 +15,10 @@ import kotlinx.coroutines.flow.distinctUntilChanged
  */
 class NavMux(
     private val mapsFlow: Flow<NavFrame?>,
-    private val idleClockFlow: Flow<NavFrame>,
+    private val idleClockFlow: Flow<NavFrame?>,
 ) {
-    /** Stream of frames; Maps wins when non-null, otherwise the idle clock. */
-    val frame: Flow<NavFrame> = combine(mapsFlow, idleClockFlow) { maps, idle ->
+    /** Null means neither navigation nor an enabled idle display is available. */
+    val frame: Flow<NavFrame?> = combine(mapsFlow, idleClockFlow.onStart { emit(null) }) { maps, idle ->
         maps ?: idle
     }.distinctUntilChanged()
 }

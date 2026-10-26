@@ -41,6 +41,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -48,6 +49,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.mrwick.redline.protocol.NavFrame
 import dev.mrwick.redline.ui.theme.GixxerTokens
+import dev.mrwick.redline.ui.components.GixxerIcons
+import dev.mrwick.redline.nav.navigationDistanceLabel
 
 /**
  * Faux-bike-cluster card showing the latest a531 frame sent to the bike. Goes
@@ -173,6 +176,7 @@ private fun NavBody(nav: NavFrame) {
         ManeuverIcon(nav.maneuverId, modifier = Modifier.size(72.dp))
         Spacer(Modifier.width(16.dp))
         Column(modifier = Modifier.weight(1f)) {
+            Text(maneuverSymbol(nav.maneuverId).label, style = MaterialTheme.typography.bodyMedium)
             Text(
                 text = humanizeDistance(nav.distNext, nav.distNextUnit),
                 style = MaterialTheme.typography.headlineMedium,
@@ -260,26 +264,17 @@ private fun NowPlayingBody(nav: NavFrame) {
     }
 }
 
-/** "0001" + "k" → "1 km". Trims leading zeros + maps the one-letter unit byte
- *  to a readable suffix. Returns "—" if [valueStr] is empty/garbage. */
-private fun humanizeDistance(valueStr: String, unitStr: String): String {
-    val v = valueStr.trimStart('0').ifEmpty { "0" }
-    val u = when (unitStr.trim()) {
-        "M", "m" -> "m"
-        "k", "K" -> "km"
-        "" -> ""
-        else -> unitStr.trim()
-    }
-    return if (u.isEmpty()) v else "$v $u"
-}
+private fun humanizeDistance(valueStr: String, unitStr: String): String =
+    navigationDistanceLabel(valueStr, unitStr)
 
 /** "1226PM" → "12:26 PM". Idempotent for already-formatted strings. */
-private fun formatEta(eta: String): String {
+internal fun formatEta(eta: String): String {
     if (eta.contains(':')) return eta
     if (eta.length < 4) return eta
     val tail = eta.takeLast(2)
     val isAmPm = tail.equals("AM", ignoreCase = true) || tail.equals("PM", ignoreCase = true)
     val digits = if (isAmPm) eta.dropLast(2) else eta
+    if (!digits.all(Char::isDigit)) return eta.trim()
     val ap = if (isAmPm) " ${tail.uppercase()}" else ""
     if (digits.length < 3) return eta
     val hh = digits.dropLast(2)
@@ -303,28 +298,32 @@ private fun weatherDescriptor(code: Int): Pair<String, androidx.compose.ui.graph
     else -> "Clear" to Icons.Outlined.WbSunny
 }
 
-/**
- * Renders a simple arrow per Mappls maneuver id.
- *
- * ASSUMED: The maneuver-id mapping below (2=left, 3=right, 23=u-turn,
- * 71=roundabout, 50=destination flag, 8=generic forward) is best-effort based
- * on the spec; concrete id semantics live in the bike's cluster firmware and
- * have not been exhaustively decoded. Unknown ids fall back to a forward arrow.
- */
+/** Semantic preview of the transmitted OEM byte; not a cluster ROM simulation. */
 @Composable
 private fun ManeuverIcon(maneuverId: Int, modifier: Modifier = Modifier) {
-    // Bespoke REDLINE moto glyphs (see GixxerIcons). Mappls maneuver ids:
-    // 2=left, 3=right, 23=u-turn; everything else → straight/forward.
-    val glyph = when (maneuverId) {
-        2 -> dev.mrwick.redline.ui.components.GixxerIcons.ManeuverLeft
-        3 -> dev.mrwick.redline.ui.components.GixxerIcons.ManeuverRight
-        23 -> dev.mrwick.redline.ui.components.GixxerIcons.ManeuverUTurn
-        else -> dev.mrwick.redline.ui.components.GixxerIcons.ManeuverStraight
+    val symbol = maneuverSymbol(maneuverId)
+    val glyph = when (symbol.shape) {
+        ManeuverShape.TURN -> if (symbol.left) GixxerIcons.ManeuverLeft else GixxerIcons.ManeuverRight
+        ManeuverShape.SLIGHT -> GixxerIcons.ManeuverSlight
+        ManeuverShape.SHARP -> GixxerIcons.ManeuverSharp
+        ManeuverShape.KEEP -> GixxerIcons.ManeuverKeep
+        ManeuverShape.T_JUNCTION -> GixxerIcons.ManeuverTJunction
+        ManeuverShape.RAMP, ManeuverShape.FORK -> GixxerIcons.ManeuverRamp
+        ManeuverShape.MERGE -> GixxerIcons.ManeuverMerge
+        ManeuverShape.U_TURN -> GixxerIcons.ManeuverUTurn
+        ManeuverShape.ARRIVAL -> GixxerIcons.ManeuverArrival
+        ManeuverShape.HEADING -> GixxerIcons.ManeuverHeading
+        ManeuverShape.ROUNDABOUT -> GixxerIcons.ManeuverRoundabout
+        ManeuverShape.STRAIGHT -> GixxerIcons.ManeuverStraight
+        ManeuverShape.UNKNOWN -> return
     }
     Icon(
         imageVector = glyph,
-        contentDescription = null,
+        contentDescription = symbol.label,
         tint = dev.mrwick.redline.ui.theme.GixxerBrand.accent,
-        modifier = modifier,
+        modifier = modifier.graphicsLayer {
+            scaleX = if (symbol.left && symbol.shape != ManeuverShape.TURN) -1f else 1f
+            rotationZ = symbol.rotation
+        },
     )
 }

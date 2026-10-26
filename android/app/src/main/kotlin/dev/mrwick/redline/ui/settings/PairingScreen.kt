@@ -16,6 +16,9 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Card
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -29,6 +32,9 @@ import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -37,6 +43,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.mrwick.redline.ble.DiscoveredBike
+import dev.mrwick.redline.protocol.ClusterProtocol
+import dev.mrwick.redline.protocol.SuzukiModel
+import dev.mrwick.redline.protocol.SuzukiProfile
 import dev.mrwick.redline.ui.theme.GixxerTokens
 import kotlinx.coroutines.delay
 
@@ -50,6 +59,8 @@ fun PairingScreen(vm: PairingViewModel, onPaired: () -> Unit) {
     val pairState by vm.pairState.collectAsStateWithLifecycle()
     val pairedMac by vm.pairedMac.collectAsStateWithLifecycle()
     val pairedConn by vm.pairedConnectionState.collectAsStateWithLifecycle()
+    val pairedSuzuki by vm.pairedSuzuki.collectAsStateWithLifecycle()
+    var candidate by remember { mutableStateOf<DiscoveredBike?>(null) }
     val sorted = results.values.sortedByDescending { it.rssi }
     // Don't double-show the currently-paired bike in the scan list — it already
     // gets its own "Currently paired" card with live state.
@@ -96,23 +107,34 @@ fun PairingScreen(vm: PairingViewModel, onPaired: () -> Unit) {
                             onForget = { vm.forgetPairedBike() },
                         )
                     }
+                    item {
+                        Card(Modifier.fillMaxWidth()) {
+                            Column(Modifier.padding(14.dp)) {
+                                ProfileSelector(
+                                    model = pairedSuzuki.model,
+                                    name = pairedSuzuki.name,
+                                    onSelect = vm::selectModel,
+                                )
+                            }
+                        }
+                    }
                 }
                 if (bonded.isNotEmpty()) {
                     item { SectionLabel("Previously paired", count = bonded.size) }
                     items(bonded, key = { "b-${it.mac}" }) { bike ->
-                        BikeRow(bike, likely = isLikelySuzuki(bike), onPick = { vm.pickBike(bike, onPaired) })
+                        BikeRow(bike, likely = isLikelySuzuki(bike), onPick = { candidate = bike })
                     }
                 }
                 if (likely.isNotEmpty()) {
                     item { SectionLabel("Likely your bike", count = likely.size) }
                     items(likely, key = { "l-${it.mac}" }) { bike ->
-                        BikeRow(bike, likely = true, onPick = { vm.pickBike(bike, onPaired) })
+                        BikeRow(bike, likely = true, onPick = { candidate = bike })
                     }
                 }
                 if (others.isNotEmpty()) {
                     item { SectionLabel("Other nearby BLE devices", count = others.size) }
                     items(others, key = { "o-${it.mac}" }) { bike ->
-                        BikeRow(bike, likely = false, onPick = { vm.pickBike(bike, onPaired) })
+                        BikeRow(bike, likely = false, onPick = { candidate = bike })
                     }
                 }
             }
@@ -126,6 +148,72 @@ fun PairingScreen(vm: PairingViewModel, onPaired: () -> Unit) {
             PairOverlay(state = pairState, onDismiss = { vm.clearPairState() })
         }
     }
+    candidate?.let { bike ->
+        SuzukiProfileDialog(
+            bike = bike,
+            onDismiss = { candidate = null },
+            onConnect = { model ->
+                vm.pickBike(bike, model, onPaired)
+                candidate = null
+            },
+        )
+    }
+}
+
+@Composable
+internal fun SuzukiProfileDialog(
+    bike: DiscoveredBike,
+    onDismiss: () -> Unit,
+    onConnect: (SuzukiModel) -> Unit,
+) {
+    var selectedModel by remember(bike.mac) { mutableStateOf(SuzukiModel.AUTO) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Suzuki cluster profile") },
+        text = {
+            Column {
+                Text(bike.displayName)
+                ProfileSelector(selectedModel, bike.name) { selectedModel = it }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onConnect(selectedModel) }) { Text("Connect") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+@Composable
+internal fun ProfileSelector(model: SuzukiModel, name: String?, onSelect: (SuzukiModel) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    val profile = SuzukiProfile(model, name)
+    Text("Navigation model", style = MaterialTheme.typography.titleSmall)
+    Box {
+        TextButton(onClick = { expanded = true }) { Text(model.label) }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            SuzukiModel.entries.forEach { option ->
+                DropdownMenuItem(
+                    text = { Text(option.label) },
+                    onClick = {
+                        expanded = false
+                        onSelect(option)
+                    },
+                )
+            }
+        }
+    }
+    Text(profile.description, style = MaterialTheme.typography.bodySmall)
+    Spacer(Modifier.height(8.dp))
+    val protocol = ClusterProtocol.fromClusterName(name)
+    Text(
+        if (protocol == null) {
+            "Wire format unverified: standard compatibility mode. Choosing a model does not verify its checksum."
+        } else {
+            "Wire format: $protocol (detected separately from navigation model)."
+        },
+        style = MaterialTheme.typography.bodySmall,
+        color = if (protocol == null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }
 
 @Composable
@@ -384,6 +472,9 @@ private fun SignalBars(rssi: Int) {
  */
 private fun isLikelySuzuki(bike: DiscoveredBike): Boolean {
     val name = bike.name?.uppercase() ?: ""
+    if (SuzukiProfile(SuzukiModel.AUTO, bike.name).detectedModel != null ||
+        name.startsWith("SAS21") || name.startsWith("SBS51")
+    ) return true
     if (name.startsWith("SBM")) return true
     if (bike.mac.uppercase().startsWith("74:B8:39")) return true
     val v = bike.vendor?.lowercase() ?: ""

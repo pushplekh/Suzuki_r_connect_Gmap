@@ -18,7 +18,7 @@ object ManeuverMap {
      * Cluster byte for "no real maneuver" — `0x2e` ('.'). The OEM app forces this
      * into the a531 maneuver slot when there's no active navigation (degraded /
      * idle), and the cluster renders no arrow for it (NOTES.md §maneuver table,
-     * DISCOVERIES.md 2026-05-23 "A0.D() forces 46 when status not in {1,3,5}").
+     * DISCOVERIES.md 2026-10-19 re-audit of Suzuki Connect 7.6 `B0.D()`).
      * Used for the idle clock / welcome so they don't draw a misleading turn
      * arrow when nothing is being navigated.
      *
@@ -38,7 +38,8 @@ object ManeuverMap {
      * Filename inside `Context.filesDir` used to persist the hash table.
      * One entry per line: `<hex-hash> <maneuver-id>`. Newest-write-wins.
      */
-    internal const val PERSIST_FILENAME = "maneuver_hash_table.tsv"
+    // v1 could learn reversed sharp/slight IDs and swapped fork/merge families.
+    internal const val PERSIST_FILENAME = "maneuver_hash_table_v2.tsv"
 
     // Synchronized via the object's monitor (all accesses go through the object).
     private val bitmapHashToManeuver: MutableMap<Long, Int> = HashMap()
@@ -65,6 +66,9 @@ object ManeuverMap {
         if (persistFile?.absolutePath == file.absolutePath) {
             Log.d(TAG, "initPersistence: already wired to ${file.absolutePath}")
             return
+        }
+        if (!file.exists() && File(context.filesDir, "maneuver_hash_table.tsv").exists()) {
+            Log.w(TAG, "Ignoring legacy bitmap-hash cache: maneuver semantics corrected; relearning required")
         }
         persistFile = file
         loadFromDisk(file)
@@ -159,11 +163,9 @@ object ManeuverMap {
     // ------------------------------------------------------------------
     // Stage 2: Mappls maneuver ID -> Suzuki cluster byte.
     //
-    // Ported verbatim from the if-chain in A0.C() at jadx-retry/.../A0.java:458.
-    // The Mappls SDK populates an internal maneuverID (0..75) into AdviseInfo.f;
-    // A0.C() then translates that to the byte that is actually written to a531
-    // byte 2. The two integers are not the same — see the design spec for
-    // background.
+    // Ported from the earlier A0.C() decompilation and reverified against
+    // B0.C() in the supplied Suzuki Connect 7.6 APK. The Mappls maneuver ID
+    // (0..75) is translated before it is written to a531 byte 2.
     //
     // Default branch covers all bikes except {e-ACCESS, Access-TFT Edition,
     // Burgman Street-TFT Edition, Access} and anything whose BTID contains
@@ -194,7 +196,7 @@ object ManeuverMap {
      *     the fallthrough branches.
      */
     fun mapplsIdToClusterByte(mapplsId: Int, vehicleModel: String?, btid: String? = null): Int? {
-        // OEM checks BOTH conditions (A0.java:646 + :660): vehicleModel in the
+        // OEM checks BOTH conditions (B0.C() in Suzuki Connect 7.6): vehicleModel in the
         // special-cased set OR BTID containing "SBS51". The two are independent
         // — some bikes match one but not the other.
         val isBurgmanLike = (vehicleModel != null && vehicleModel in BURGMAN_LIKE_MODELS) ||
@@ -224,6 +226,7 @@ object ManeuverMap {
             23 -> 35
             24 -> 36
             25 -> 37
+            36 -> 43
             26, 27, 28 -> 31
             30, 31 -> 32
             41 -> 39

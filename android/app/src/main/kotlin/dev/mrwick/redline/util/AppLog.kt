@@ -9,6 +9,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
 import java.io.File
 import java.io.PrintWriter
 import java.io.StringWriter
@@ -47,14 +50,26 @@ object AppLog {
     )
 
     private const val RING_CAPACITY = 2000
-    private const val MAX_FILE_BYTES = 512L * 1024L
+    private const val MAX_FILE_BYTES = 4L * 1024L * 1024L
     private const val TS_FMT = "MM-dd HH:mm:ss.SSS"
 
     private val ring = RingLog<Entry>(RING_CAPACITY)
     private val _flow = MutableStateFlow<List<Entry>>(emptyList())
     val entries: StateFlow<List<Entry>> = _flow.asStateFlow()
 
-    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(1))
+    private val snapshotRequests = Channel<Unit>(Channel.CONFLATED)
+    init {
+        ioScope.launch {
+            for (ignored in snapshotRequests) {
+                delay(250)
+                if (_flow.subscriptionCount.value > 0) _flow.value = ring.snapshot()
+            }
+        }
+        ioScope.launch {
+            _flow.subscriptionCount.collect { if (it > 0) snapshotRequests.trySend(Unit) }
+        }
+    }
     private val tsFormat = ThreadLocal.withInitial {
         SimpleDateFormat(TS_FMT, Locale.US)
     }
@@ -67,7 +82,7 @@ object AppLog {
         val dir = File(context.filesDir, "diag").apply { mkdirs() }
         activeFile = File(dir, "app.log")
         rotatedFile = File(dir, "app.1.log")
-        i("AppLog", "logger initialized, file=${activeFile?.absolutePath}")
+        i("AppLog", "logger initialized, file=${activeFile?.absolutePath} navTraceSchema=1 retentionBytes=$MAX_FILE_BYTES")
     }
 
     fun d(tag: String, msg: String) = log(Level.D, tag, msg, null)
@@ -90,7 +105,7 @@ object AppLog {
             throwable = t?.let { stackOf(it) },
         )
         ring.add(entry)
-        _flow.value = ring.snapshot()
+        if (_flow.subscriptionCount.value > 0) snapshotRequests.trySend(Unit)
         appendToFile(entry)
     }
 

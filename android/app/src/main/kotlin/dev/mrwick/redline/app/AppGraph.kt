@@ -13,6 +13,10 @@ import dev.mrwick.redline.data.RideStore
 import dev.mrwick.redline.data.Settings
 import dev.mrwick.redline.location.LastParkedTracker
 import dev.mrwick.redline.nav.NavMux
+import dev.mrwick.redline.protocol.isWellFormed
+import dev.mrwick.redline.util.AppLog
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -35,6 +39,71 @@ object AppGraph {
     @Volatile var bleClient: BleClient? = null
     @Volatile var frameWriter: FrameWriter? = null
     @Volatile var navMux: NavMux? = null
+
+    private val displayProbeWindow = dev.mrwick.redline.nav.DisplayProbeWindow()
+    internal fun suppressAutomaticDisplay(): Boolean =
+        displayProbeWindow.suppressAutomaticDisplay(
+            System.nanoTime() / 1_000_000,
+            dev.mrwick.redline.nav.MapsNavSource.parsed.value != null,
+        )
+
+    internal suspend fun testDisplay(
+        probe: dev.mrwick.redline.nav.DisplayProbe,
+        riderName: String,
+        experimentalInstructions: Boolean,
+    ): String {
+        if (connectionState.value !is ConnectionState.Ready ||
+            !displayProbeWindow.begin(
+                System.nanoTime() / 1_000_000,
+                dev.mrwick.redline.nav.MapsNavSource.parsed.value != null,
+            )
+        ) {
+            AppLog.w("DisplayProbe", "Rejected $probe: requires Ready, no Maps navigation and no other test")
+            return "Not started: connect the cluster, stop Maps navigation and wait for any other test to finish."
+        }
+        AppLog.i("DisplayProbe", "START probe=$probe holdAutomaticDisplayMs=8000 rendering=unverified")
+        var result = "Test complete. Record what appeared; a successful write does not prove rendering."
+        var restoreFailed = false
+        try {
+            if (!sendFrame(probe.frame(riderName), note = "display-probe $probe")) {
+                result = "Write failed. Check Diagnostics."
+            } else {
+                for (second in 1..8) {
+                    kotlinx.coroutines.delay(1_000)
+                    if (dev.mrwick.redline.nav.MapsNavSource.parsed.value != null ||
+                        connectionState.value !is ConnectionState.Ready
+                    ) {
+                        AppLog.w("DisplayProbe", "ABORT probe=$probe navigation started or link lost")
+                        result = "Test ended because navigation started or the link was lost. Record what appeared."
+                        break
+                    }
+                }
+            }
+        } finally {
+            try {
+                if (probe.testsIdentity) {
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                        val currentInstruction = if (experimentalInstructions) {
+                            dev.mrwick.redline.nav.clusterInstructionText(dev.mrwick.redline.nav.MapsNavSource.parsed.value)
+                        } else null
+                        val restored = sendFrame(
+                            dev.mrwick.redline.protocol.IdentityFrame(currentInstruction ?: riderName, isFresh = false).encode(),
+                        )
+                        if (restored) {
+                            AppLog.i("DisplayProbe", "RESTORE identity localWriteSuccess=true navigationText=${currentInstruction != null}")
+                        } else {
+                            restoreFailed = true
+                            AppLog.w("DisplayProbe", "RESTORE identity failed; reconnect to restore the saved rider name")
+                        }
+                    }
+                }
+            } finally {
+                displayProbeWindow.finish()
+                AppLog.i("DisplayProbe", "END probe=$probe normalDisplayResumed=true")
+            }
+        }
+        return if (restoreFailed) "$result Saved-name restoration failed; reconnect and check Diagnostics." else result
+    }
 
     // Transient on-bike test toggles (NOT persisted). Set from DeveloperSettings,
     // read by HeartbeatLoop's a533 providers, so we can flip the SMS/Call
@@ -76,17 +145,30 @@ object AppGraph {
     }
 
     /**
-     * Composer / dev tools call this. Returns false if no BLE client is wired yet.
-     * Real send goes through FrameWriter so it respects pacing + priorities.
+     * Composer / dev tools call this. True means the GATT write completed, not just queued.
      */
-    suspend fun sendFrame(bytes: ByteArray): Boolean {
-        if (bytes.size != 30) return false
+    suspend fun sendFrame(bytes: ByteArray, note: String = "composer"): Boolean {
+        if (!isWellFormed(bytes)) {
+            AppLog.w("Composer", "Cannot send invalid Suzuki frame")
+            return false
+        }
+        val client = bleClient
+        if (client == null || client.state.value !is ConnectionState.Ready) {
+            AppLog.w("Composer", "Cannot send: cluster is not Ready (${client?.state?.value})")
+            return false
+        }
         val writer = frameWriter
         return if (writer != null) {
-            writer.enqueue(FrameWriter.Entry(FrameWriter.Priority.URGENT, bytes, note = "composer"))
-            true
+            val completion = CompletableDeferred<Boolean>()
+            if (!writer.enqueue(FrameWriter.Entry(
+                    FrameWriter.Priority.URGENT, bytes, note = note, completion = completion,
+                ))) return false
+            withTimeoutOrNull(10_000) { completion.await() } ?: run {
+                AppLog.w("Composer", "Timed out waiting for cluster write completion")
+                false
+            }
         } else {
-            bleClient?.write(bytes) ?: false
+            client.write(bytes, note = note)
         }
     }
 

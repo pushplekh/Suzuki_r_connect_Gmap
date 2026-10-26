@@ -1,17 +1,15 @@
 package dev.mrwick.redline.notifications
 
 import android.content.Context
+import android.telecom.TelecomManager
 import android.service.notification.StatusBarNotification
-import android.util.Log
 import dev.mrwick.redline.app.AppGraph
 import dev.mrwick.redline.ble.FrameWriter
 import dev.mrwick.redline.data.Settings
-// PARKED (2026-06-04): Google Maps navigation is shelved.
-// import dev.mrwick.redline.nav.GoogleMapsParser
-// import dev.mrwick.redline.nav.MapsNavSource
-import dev.mrwick.redline.protocol.CallFrame
-import dev.mrwick.redline.protocol.MissedCallFrame
+import dev.mrwick.redline.nav.GoogleMapsParser
+import dev.mrwick.redline.nav.MapsNavSource
 import dev.mrwick.redline.protocol.SmsFrame
+import dev.mrwick.redline.util.AppLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -34,7 +32,7 @@ object NotificationDispatcher {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     private val allowlist = MutableStateFlow<Set<String>>(Settings.DEFAULT_ALLOWLIST)
-    private val callsSeen = mutableMapOf<String, Long>() // key=number, value=tStart for missed-call decision
+    @Volatile private var mapsNavNotificationKey: String? = null
 
     // PERF: NotificationListenerService can reconnect (system restarts the
     // listener after notification-access toggles, app updates, etc.). Each
@@ -57,52 +55,49 @@ object NotificationDispatcher {
 
     fun onPosted(context: Context, sbn: StatusBarNotification) {
         try {
+            val isPhone = sbn.packageName in PHONE_PACKAGES ||
+                sbn.packageName == context.getSystemService(TelecomManager::class.java)?.defaultDialerPackage
+            if (isPhone || sbn.packageName in CallAlerts.WHATSAPP_PACKAGES) {
+                if (CallAlerts.posted(sbn) || isPhone) return
+            }
             when (sbn.packageName) {
-                // PARKED: Google Maps nav shelved — Maps notifications are ignored.
-                // GoogleMapsParser.PKG_GOOGLE_MAPS -> handleMaps(context, sbn)
-                in PHONE_PACKAGES -> handlePhone(sbn)
+                GoogleMapsParser.PKG_GOOGLE_MAPS -> handleMaps(context, sbn)
                 in SMS_PACKAGES -> handleSms(sbn, isSms = true)
                 else -> {
                     if (sbn.packageName in allowlist.value) handleSms(sbn, isSms = false)
                 }
             }
         } catch (t: Throwable) {
-            Log.w(tag, "onPosted threw for ${sbn.packageName}", t)
+            AppLog.w(tag, "onPosted threw for ${sbn.packageName}", t)
         }
     }
 
     fun onRemoved(sbn: StatusBarNotification) {
-        // PARKED: Google Maps nav shelved — nothing to clear on notification removal.
-        // if (sbn.packageName == GoogleMapsParser.PKG_GOOGLE_MAPS) {
-        //     MapsNavSource.clear()
-        // }
-    }
-
-    // PARKED (2026-06-04): Google Maps navigation is shelved. Revive together
-    // with the imports + onPosted/onRemoved branches above and the NavMux maps
-    // slot in BikeBridgeService.
-    // private fun handleMaps(context: Context, sbn: StatusBarNotification) {
-    //     val parsed = GoogleMapsParser.parse(context, sbn) ?: return
-    //     MapsNavSource.update(parsed)
-    // }
-
-    private fun handlePhone(sbn: StatusBarNotification) {
-        val title = sbn.notification?.extras?.getString(android.app.Notification.EXTRA_TITLE) ?: return
-        val text = sbn.notification?.extras?.getString(android.app.Notification.EXTRA_TEXT)?.lowercase() ?: ""
-        if ("incoming" in text || "calling" in text || "ringing" in title.lowercase()) {
-            // Dedup: Android re-posts the same call notification on update; we only want one cluster ping per call.
-            if (!Dedup.firstTime("call:$title")) return
-            val frame = CallFrame(number = title.take(20), isWhatsapp = false, state = 0x31).encode()
-            scope.launch { AppGraph.frameWriter?.enqueue(FrameWriter.Entry(FrameWriter.Priority.URGENT, frame, "call")) }
-            callsSeen[title] = System.currentTimeMillis()
-        } else if ("missed" in text || "missed" in title.lowercase()) {
-            if (!Dedup.firstTime("missed:$title")) return
-            val frame = MissedCallFrame(name = title.take(18), missedCount = 1, isWhatsapp = false).encode()
-            scope.launch { AppGraph.frameWriter?.enqueue(FrameWriter.Entry(FrameWriter.Priority.URGENT, frame, "missed")) }
+        CallAlerts.tracker.removed(sbn.key)
+        if (sbn.packageName == GoogleMapsParser.PKG_GOOGLE_MAPS) {
+            dev.mrwick.redline.util.AppLog.i(
+                "NavTrace", "REMOVED keyHash=${sbn.key.hashCode()} matchesActive=${mapsNavNotificationKey == sbn.key}",
+            )
+        }
+        if (sbn.packageName == GoogleMapsParser.PKG_GOOGLE_MAPS &&
+            mapsNavNotificationKey == sbn.key
+        ) {
+            mapsNavNotificationKey = null
+            MapsNavSource.clear()
         }
     }
 
+    private fun handleMaps(context: Context, sbn: StatusBarNotification) {
+        val parsed = GoogleMapsParser.parse(context, sbn) ?: return
+        mapsNavNotificationKey = sbn.key
+        MapsNavSource.update(parsed)
+    }
+
     private fun handleSms(sbn: StatusBarNotification, isSms: Boolean) {
+        if (CallAlerts.tracker.state.value.inCall) {
+            dev.mrwick.redline.util.AppLog.i("CallAlerts", "Suppressing message banner during active call")
+            return
+        }
         val extras = sbn.notification?.extras ?: return
         val sender = extras.getString(android.app.Notification.EXTRA_TITLE)?.take(20) ?: return
         val body = extras.getString(android.app.Notification.EXTRA_TEXT).orEmpty()
@@ -126,6 +121,7 @@ object NotificationDispatcher {
         "com.google.android.dialer",
         "com.android.dialer",
         "com.samsung.android.dialer",
+        "com.android.server.telecom",
     )
     private val SMS_PACKAGES = setOf(
         "com.google.android.apps.messaging",

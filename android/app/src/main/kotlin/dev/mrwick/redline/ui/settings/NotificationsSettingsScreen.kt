@@ -49,6 +49,14 @@ fun NotificationsSettingsScreen(
         item { DndAccessPermissionRow() }
         item { NotificationAccessRow() }
         item {
+            Text(
+                "Calls use the caller name or number exposed by your dialer's notification. " +
+                    "Missed-call alerts clear when their phone notification is removed. " +
+                    "Cluster light and banner behavior still needs a stationary check.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+        item {
             SettingsSection("Notifications mirrored to bike") {
                 Button(onClick = onOpenAllowlist, modifier = Modifier.fillMaxWidth()) {
                     Text("Edit allowlist")

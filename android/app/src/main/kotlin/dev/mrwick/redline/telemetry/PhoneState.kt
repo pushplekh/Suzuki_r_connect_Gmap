@@ -5,6 +5,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.BatteryManager
+import android.os.PowerManager
+import androidx.core.content.ContextCompat
+import dev.mrwick.redline.util.AppLog
 import android.telephony.SignalStrength
 import android.telephony.TelephonyCallback
 import android.telephony.TelephonyManager
@@ -17,6 +20,13 @@ import kotlinx.coroutines.flow.asStateFlow
  * One instance lives in BikeBridgeService; observed by HeartbeatLoop.
  */
 class PhoneState(private val context: Context) {
+    private val power = context.getSystemService(PowerManager::class.java)
+    @Volatile private var batteryTemperatureTenths: Int? = null
+
+    fun diagnosticSummary(): String =
+        "interactive=${power.isInteractive} powerSave=${power.isPowerSaveMode} deviceIdle=${power.isDeviceIdleMode} " +
+            "thermalStatus=${power.currentThermalStatus} batteryTempTenthsC=$batteryTemperatureTenths " +
+            "batteryPercent=${_batteryPercent.value} charging=${_isCharging.value}"
 
     private val _batteryPercent = MutableStateFlow(50)
     val batteryPercent: StateFlow<Int> = _batteryPercent.asStateFlow()
@@ -29,6 +39,13 @@ class PhoneState(private val context: Context) {
 
     private val batteryReceiver = object : BroadcastReceiver() {
         override fun onReceive(c: Context, intent: Intent) {
+            if (intent.action != Intent.ACTION_BATTERY_CHANGED) {
+                AppLog.i("RuntimeState", "event=${intent.action} ${diagnosticSummary()}")
+                return
+            }
+            batteryTemperatureTenths = if (intent.hasExtra(BatteryManager.EXTRA_TEMPERATURE)) {
+                intent.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0)
+            } else null
             val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, 50)
             val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, 100).coerceAtLeast(1)
             _batteryPercent.value = (level * 100 / scale).coerceIn(0, 100)
@@ -54,7 +71,13 @@ class PhoneState(private val context: Context) {
     private var telephonyManager: TelephonyManager? = null
 
     fun start() {
-        context.registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        ContextCompat.registerReceiver(context, batteryReceiver, IntentFilter().apply {
+            addAction(Intent.ACTION_BATTERY_CHANGED)
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_SCREEN_OFF)
+            addAction(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED)
+            addAction(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED)
+        }, ContextCompat.RECEIVER_NOT_EXPORTED)
         try {
             telephonyManager = context.getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S && telephonyCallback != null) {

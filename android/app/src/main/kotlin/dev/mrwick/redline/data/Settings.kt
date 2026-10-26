@@ -12,6 +12,9 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import dev.mrwick.redline.analytics.JourneyConfig
+import dev.mrwick.redline.protocol.PairedSuzuki
+import dev.mrwick.redline.protocol.SuzukiModel
+import dev.mrwick.redline.util.AppLog
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -26,12 +29,43 @@ import kotlinx.coroutines.flow.map
  * sentinels (empty string for MAC, [Double.NaN] for coordinates) and converted
  * back to `null` in the public Flows via helpers in [SettingsConversions].
  */
-class Settings(context: Context) {
-    private val ds: DataStore<Preferences> = context.settingsDataStore
+class Settings internal constructor(private val ds: DataStore<Preferences>) {
+    constructor(context: Context) : this(context.settingsDataStore)
 
     /** Paired bike MAC address, or null if no bike has been paired. */
     val bikeMac: Flow<String?> =
         ds.data.map { decodeNullableString(it[Keys.BIKE_MAC]) }
+
+    val experimentalInstructionText: Flow<Boolean> =
+        ds.data.map { it[booleanPreferencesKey("experimental_instruction_text")] ?: false }
+
+    val navigationTextInEta: Flow<Boolean> =
+        ds.data.map { it[booleanPreferencesKey("navigation_text_in_eta")] ?: false }
+
+    suspend fun setNavigationTextInEta(enabled: Boolean) {
+        ds.edit { it[booleanPreferencesKey("navigation_text_in_eta")] = enabled }
+    }
+
+    suspend fun setExperimentalInstructionText(enabled: Boolean) {
+        ds.edit { it[booleanPreferencesKey("experimental_instruction_text")] = enabled }
+    }
+
+    val pairedBike: Flow<Pair<String?, String?>> = ds.data.map {
+        decodeNullableString(it[Keys.BIKE_MAC]) to decodeNullableString(it[Keys.BIKE_NAME])
+    }
+
+    val pairedSuzuki: Flow<PairedSuzuki> = ds.data.map { prefs ->
+        val stored = prefs[Keys.SUZUKI_MODEL]
+        val model = SuzukiModel.entries.firstOrNull { it.name == stored }
+        if (stored != null && model == null) {
+            AppLog.w("Settings", "Unknown Suzuki model preference '$stored'; using automatic detection")
+        }
+        PairedSuzuki(
+            decodeNullableString(prefs[Keys.BIKE_MAC]),
+            decodeNullableString(prefs[Keys.BIKE_NAME]),
+            model ?: SuzukiModel.AUTO,
+        )
+    }
 
     /** Rider display name; defaults to "Rider". */
     val riderName: Flow<String> =
@@ -153,9 +187,16 @@ class Settings(context: Context) {
     val activeRideMetric: Flow<String> =
         ds.data.map { it[Keys.ACTIVE_RIDE_METRIC] ?: DEFAULT_ACTIVE_RIDE_METRIC }
 
-    /** User-set fuel-tank capacity in litres; defaults to [DEFAULT_FUEL_CAPACITY_L]. */
+    /** Explicit override, then selected/detected model capacity, then legacy default. */
     val fuelCapacityL: Flow<Double> =
-        ds.data.map { it[Keys.FUEL_CAPACITY_L] ?: DEFAULT_FUEL_CAPACITY_L }
+        ds.data.map { prefs ->
+            val model = SuzukiModel.entries.firstOrNull { it.name == prefs[Keys.SUZUKI_MODEL] }
+                ?: SuzukiModel.AUTO
+            val profile = PairedSuzuki(
+                name = decodeNullableString(prefs[Keys.BIKE_NAME]), model = model,
+            ).profile
+            prefs[Keys.FUEL_CAPACITY_L] ?: profile.fuelCapacityLitres ?: DEFAULT_FUEL_CAPACITY_L
+        }
 
     /**
      * Odometer (km) of the most-recently logged fuel fill at the time the user
@@ -198,7 +239,25 @@ class Settings(context: Context) {
 
     /** Set the paired bike MAC; pass null to clear. */
     suspend fun setBikeMac(mac: String?) {
-        ds.edit { it[Keys.BIKE_MAC] = encodeNullableString(mac) }
+        ds.edit {
+            if (decodeNullableString(it[Keys.BIKE_MAC]) != mac) {
+                it.remove(Keys.BIKE_NAME)
+                it.remove(Keys.SUZUKI_MODEL)
+            }
+            it[Keys.BIKE_MAC] = encodeNullableString(mac)
+        }
+    }
+
+    suspend fun setPairedBike(mac: String, name: String?, model: SuzukiModel = SuzukiModel.AUTO) {
+        ds.edit {
+            it[Keys.BIKE_MAC] = mac
+            it[Keys.BIKE_NAME] = encodeNullableString(name)
+            it[Keys.SUZUKI_MODEL] = model.name
+        }
+    }
+
+    suspend fun setSuzukiModel(model: SuzukiModel) {
+        ds.edit { it[Keys.SUZUKI_MODEL] = model.name }
     }
 
     /** Set the rider display name. */
@@ -389,6 +448,8 @@ class Settings(context: Context) {
     /** Internal preference keys. */
     private object Keys {
         val BIKE_MAC = stringPreferencesKey("bike_mac")
+        val BIKE_NAME = stringPreferencesKey("bike_name")
+        val SUZUKI_MODEL = stringPreferencesKey("suzuki_model")
         val RIDER_NAME = stringPreferencesKey("rider_name")
         val AUTO_START_ON_BOOT = booleanPreferencesKey("auto_start_on_boot")
         val APP_LOCK_ENABLED = booleanPreferencesKey("app_lock_enabled")

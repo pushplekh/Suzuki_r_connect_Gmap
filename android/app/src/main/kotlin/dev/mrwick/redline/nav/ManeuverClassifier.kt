@@ -8,8 +8,8 @@ import dev.mrwick.redline.util.AppLog
  * decision for [GoogleMapsParser].
  *
  * Strategy:
- *   1. If [bitmap] present: aHash; lookup via [ManeuverMap.fromBitmapHashNearest]
- *      with a Hamming tolerance of [HAMMING_TOLERANCE]. If found, that wins.
+ *   1. Recognized instruction text wins over perceptual hashes, which can collide.
+ *      Hash lookup is a fallback only when text cannot classify the instruction.
  *   2. Always compute the text-fallback id too (cheap), so we can compare.
  *   3. If both bitmap-hash AND text returned non-default ids AND they DISAGREE,
  *      emit a WARN to AppLog — the bitmap-hash table has likely-wrong entries.
@@ -36,29 +36,73 @@ object ManeuverClassifier {
     private const val HAMMING_TOLERANCE = 5
 
     /** Provenance of the chosen maneuver id, for diagnostics. */
-    enum class Source { HashMatch, TextFallback, SelfTrainedFromText, DefaultArrow }
+    enum class Source { HashMatch, TextFallback, SelfTrainedFromText, Unclassified }
 
-    /** Full classification result for diagnostics. UI just needs [id]. */
-    data class Result(val id: Int, val source: Source, val textId: Int, val hashId: Int?, val hash: Long?)
+    /** Full classification result; [id] is null when neither source can classify it. */
+    data class Result(val id: Int?, val source: Source, val textId: Int?, val hashId: Int?, val hash: Long?)
 
     /**
      * Classify the maneuver based on the captured icon [bitmap] and/or the raw
-     * [instruction] text. Returns a Mappls maneuver-id (0..75); never null.
-     * Callers must apply [ManeuverMap.mapplsIdToClusterByte] before writing
-     * the result into a NavFrame.
+     * [instruction] text. Returns a Mappls maneuver ID (0..75), or null when
+     * the instruction is unrecognized and the icon has no known hash.
      *
      * @param selfTrainEnabled if true, register fresh hash→text mappings on
      *   text-fallback decisions. Default false — self-training without verified
      *   cluster-side id semantics has a runaway-pollution failure mode.
      */
     fun classify(bitmap: Bitmap?, instruction: String?, selfTrainEnabled: Boolean = false): Int {
-        val result = classifyDetailed(bitmap, instruction, selfTrainEnabled)
+        return classifyDetailed(bitmap, instruction, selfTrainEnabled).id
+            ?: MapplsIdGuesser.DEFAULT_MAPPLS_ID
+    }
+
+    /** Classify and log the full diagnostic record. */
+    fun classifyDetailed(bitmap: Bitmap?, instruction: String?, selfTrainEnabled: Boolean): Result {
+        val textId = MapplsIdGuesser.fromTextOrNull(instruction)
+        val result = if (bitmap == null) {
+            Result(
+                id = textId,
+                source = if (textId == null) Source.Unclassified else Source.TextFallback,
+                textId = textId,
+                hashId = null,
+                hash = null,
+            )
+        } else {
+            val hash = BitmapHasher.aHash64(bitmap)
+            val hashId = ManeuverMap.fromBitmapHashNearest(hash, HAMMING_TOLERANCE)
+            when {
+                hashId != null -> resolveCandidates(textId, hashId, hash)
+                // U-turn fallback direction must not teach an unverified icon side.
+                selfTrainEnabled && textId != null && textId !in setOf(6, 41) &&
+                    textId != MapplsIdGuesser.DEFAULT_MAPPLS_ID -> {
+                    ManeuverMap.registerBitmapHash(hash, textId)
+                    AppLog.i(
+                        TAG,
+                        "self-trained hash=0x${java.lang.Long.toHexString(hash)} -> id=$textId (from text)",
+                    )
+                    Result(
+                        id = textId,
+                        source = Source.SelfTrainedFromText,
+                        textId = textId,
+                        hashId = null,
+                        hash = hash,
+                    )
+                }
+                else -> Result(
+                    id = textId,
+                    source = if (textId == null) Source.Unclassified else Source.TextFallback,
+                    textId = textId,
+                    hashId = null,
+                    hash = hash,
+                )
+            }
+        }
         AppLog.i(
             TAG,
-            "id=${result.id} src=${result.source} text=${result.textId} hash=${result.hashId ?: "-"} instr=\"${instruction?.take(60)}\"",
+            "id=${result.id ?: "unclassified"} src=${result.source} text=${result.textId ?: "-"} hash=${result.hashId ?: "-"} instr=\"${instruction?.take(60)}\"",
         )
         if (result.hashId != null &&
             result.hashId != MapplsIdGuesser.DEFAULT_MAPPLS_ID &&
+            result.textId != null &&
             result.textId != MapplsIdGuesser.DEFAULT_MAPPLS_ID &&
             result.hashId != result.textId
         ) {
@@ -67,52 +111,19 @@ object ManeuverClassifier {
                 "DISAGREE hash=${result.hashId} text=${result.textId} chosen=${result.id} — bitmap table may have a wrong entry for hash=0x${java.lang.Long.toHexString(result.hash ?: 0L)}",
             )
         }
-        return result.id
+        return result
     }
 
-    /** Same as [classify] but returns the full diagnostic record. */
-    fun classifyDetailed(bitmap: Bitmap?, instruction: String?, selfTrainEnabled: Boolean): Result {
-        val textId = MapplsIdGuesser.fromText(instruction)
-        if (bitmap == null) {
-            return Result(
-                id = textId,
-                source = if (textId == MapplsIdGuesser.DEFAULT_MAPPLS_ID) Source.DefaultArrow else Source.TextFallback,
-                textId = textId,
-                hashId = null,
-                hash = null,
-            )
-        }
-        val hash = BitmapHasher.aHash64(bitmap)
-        val hashId = ManeuverMap.fromBitmapHashNearest(hash, HAMMING_TOLERANCE)
-        if (hashId != null) {
-            return Result(
-                id = hashId,
-                source = Source.HashMatch,
-                textId = textId,
-                hashId = hashId,
-                hash = hash,
-            )
-        }
-        if (selfTrainEnabled && textId != MapplsIdGuesser.DEFAULT_MAPPLS_ID) {
-            ManeuverMap.registerBitmapHash(hash, textId)
-            AppLog.i(
-                TAG,
-                "self-trained hash=0x${java.lang.Long.toHexString(hash)} -> id=$textId (from text)",
-            )
-            return Result(
-                id = textId,
-                source = Source.SelfTrainedFromText,
-                textId = textId,
-                hashId = null,
-                hash = hash,
-            )
-        }
-        return Result(
-            id = textId,
-            source = if (textId == MapplsIdGuesser.DEFAULT_MAPPLS_ID) Source.DefaultArrow else Source.TextFallback,
+    internal fun resolveCandidates(textId: Int?, hashId: Int?, hash: Long? = null): Result =
+        Result(
+            id = textId ?: hashId,
+            source = when {
+                textId != null -> Source.TextFallback
+                hashId != null -> Source.HashMatch
+                else -> Source.Unclassified
+            },
             textId = textId,
-            hashId = null,
+            hashId = hashId,
             hash = hash,
         )
-    }
 }
