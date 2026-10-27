@@ -13,6 +13,7 @@ import dev.mrwick.redline.util.AppLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
@@ -32,6 +33,8 @@ object NotificationDispatcher {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     private val allowlist = MutableStateFlow<Set<String>>(Settings.DEFAULT_ALLOWLIST)
+    private val calendarAlerts = MutableStateFlow(false)
+    private val calendarGate = CalendarAlerts.Gate()
     @Volatile private var mapsNavNotificationKey: String? = null
 
     // PERF: NotificationListenerService can reconnect (system restarts the
@@ -51,6 +54,9 @@ object NotificationDispatcher {
         scope.launch {
             s.mirrorAllowlist.collect { set -> allowlist.value = set }
         }
+        scope.launch {
+            s.calendarAlerts.collect { calendarAlerts.value = it }
+        }
     }
 
     fun onPosted(context: Context, sbn: StatusBarNotification) {
@@ -58,7 +64,17 @@ object NotificationDispatcher {
             val isPhone = sbn.packageName in PHONE_PACKAGES ||
                 sbn.packageName == context.getSystemService(TelecomManager::class.java)?.defaultDialerPackage
             if (isPhone || sbn.packageName in CallAlerts.WHATSAPP_PACKAGES) {
-                if (CallAlerts.posted(sbn) || isPhone) return
+                if (CallAlerts.posted(sbn)) return
+                if (isPhone) {
+                    logUnrecognizedCall(sbn, "Unrecognized dialer notification")
+                    return
+                }
+            } else if (sbn.notification?.category in CALL_CATEGORIES) {
+                logUnrecognizedCall(sbn, "Call notification from unlisted package")
+            }
+            if (calendarAlerts.value && CalendarAlerts.isCalendarAlert(sbn.packageName, sbn.notification?.category)) {
+                handleCalendar(sbn)
+                return
             }
             when (sbn.packageName) {
                 GoogleMapsParser.PKG_GOOGLE_MAPS -> handleMaps(context, sbn)
@@ -74,6 +90,9 @@ object NotificationDispatcher {
 
     fun onRemoved(sbn: StatusBarNotification) {
         CallAlerts.tracker.removed(sbn.key)
+        if (sbn.packageName !in CallAlerts.WHATSAPP_PACKAGES && CallAlerts.looksMissed(sbn)) {
+            CallAlerts.tracker.clearTelephonyMissed()
+        }
         if (sbn.packageName == GoogleMapsParser.PKG_GOOGLE_MAPS) {
             dev.mrwick.redline.util.AppLog.i(
                 "NavTrace", "REMOVED keyHash=${sbn.key.hashCode()} matchesActive=${mapsNavNotificationKey == sbn.key}",
@@ -91,6 +110,20 @@ object NotificationDispatcher {
         val parsed = GoogleMapsParser.parse(context, sbn) ?: return
         mapsNavNotificationKey = sbn.key
         MapsNavSource.update(parsed)
+    }
+
+    private fun handleCalendar(sbn: StatusBarNotification) {
+        if (CallAlerts.tracker.state.value.inCall) return
+        if (!calendarGate.accept(sbn.packageName, sbn.key, System.currentTimeMillis())) return
+        val frame = CalendarAlerts.frame()
+        AppLog.i(tag, "Calendar alert package=${sbn.packageName} category=${sbn.notification?.category}")
+        scope.launch {
+            delay(CalendarAlerts.FIRST_DELAY_MS)
+            repeat(CalendarAlerts.SEND_COUNT) {
+                delay(CalendarAlerts.SEND_GAP_MS)
+                AppGraph.frameWriter?.enqueue(FrameWriter.Entry(FrameWriter.Priority.URGENT, frame, "calendar/${sbn.packageName}"))
+            }
+        }
     }
 
     private fun handleSms(sbn: StatusBarNotification, isSms: Boolean) {
@@ -117,6 +150,20 @@ object NotificationDispatcher {
         scope.launch { AppGraph.frameWriter?.enqueue(FrameWriter.Entry(FrameWriter.Priority.URGENT, frame, "sms/${sbn.packageName}")) }
     }
 
+    private val loggedUnrecognized = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+
+    private fun logUnrecognizedCall(sbn: StatusBarNotification, reason: String) {
+        val description = CallAlerts.describe(sbn)
+        if (loggedUnrecognized.size > 200) loggedUnrecognized.clear()
+        if (loggedUnrecognized.add("${sbn.key.hashCode()}:$description")) {
+            AppLog.i("CallAlerts", "$reason ${description}")
+        }
+    }
+
+    private val CALL_CATEGORIES = setOf(
+        android.app.Notification.CATEGORY_CALL,
+        android.app.Notification.CATEGORY_MISSED_CALL,
+    )
     private val PHONE_PACKAGES = setOf(
         "com.google.android.dialer",
         "com.android.dialer",

@@ -1,218 +1,137 @@
-# Suzuki Connect RE
+# REDLINE — Suzuki Ride Connect replacement
 
-Personal educational reverse-engineering of the **Suzuki Connect BLE protocol** on Arjun's 2023 Suzuki Gixxer SF 150 motorcycle. The bike has a Bluetooth-enabled instrument cluster that pairs with the Suzuki Ride Connect Android app — currently using Mappls maps for turn-by-turn navigation. Goal: understand the protocol fully, then build a Google-Maps-powered replacement app and explore what else can be done with the cluster.
+An open, local-only Android app that talks to the Bluetooth instrument cluster of
+Suzuki scooters, replacing the official Suzuki Ride Connect app. It sends Google Maps
+turn-by-turn guidance, incoming calls and notifications to the cluster and reads
+vehicle telemetry back to the phone. The BLE protocol was reverse-engineered for
+educational purposes and is documented in this repository.
 
-## 🚨 Morning quickstart (after the 2026-05-24 overnight build)
+## Compatibility
 
-The Android app **REDLINE** is built and installed. Phase 2 + Phase 3-A shipped overnight.
+This version targets the **Suzuki Access and Burgman Street** Bluetooth clusters
+(non-TFT), which share one protocol family.
 
-1. Plug the K20 Pro in via USB, confirm `adb devices` shows it
-2. `./android/MORNING_QUICKSTART.sh` — builds fresh APK, installs, grants every perm, launches
-3. Follow `SMOKE_TEST.md` (13 phases against the actual bike)
-4. If anything breaks: `TROUBLESHOOTING.md`
+| Vehicle | Detection | Status |
+|---|---|---|
+| Suzuki Access | Automatic (cluster name `AS01`/`AS02`) | Tested on a vehicle |
+| Suzuki Burgman Street | Automatic (cluster name `AS11`/`AS12`) | Same protocol and mapping; not yet tested on a vehicle |
+| e-ACCESS, Access-TFT, Burgman Street-TFT | Manual selection in Bike settings | Untested |
 
-The app:
-- 130 Kotlin files · 14,167 LOC · 205 unit tests green
-- 5 tabs: Home / Dashboard / Stats / Trips / Settings
-- Replaces Suzuki Connect end-to-end (Google Maps → cluster nav, live telemetry on phone, GPX/CSV export, ride analytics, crash detection, mileage logger, frame inspector for protocol RE)
-- Local-only, no cloud, no account
-- Branded design system inspired by the bike's cluster
+Other Suzuki Ride Connect vehicles may connect using the default mapping, but they
+are not targeted or tested by this release.
 
-Project structure docs: `android/HANDOFF.md`.
-Build artifact: `android/app/build/outputs/apk/debug/app-debug.apk`.
+## Features
 
-## Android release builds
+- Google Maps turn-by-turn navigation on the cluster (arrows, distance, ETA, street text)
+- Incoming-call alert with caller name and flashing LED until the call is answered or missed
+- Missed-call, SMS and app-notification alerts
+- Speed-limit warning (5-120 km/h)
+- Calendar and meeting reminders
+- Auto-reply SMS on missed calls, with an optional reject-and-reply mode
+- Rain alert during navigation
+- Spoken alerts for connection, low fuel and low battery
+- Live telemetry dashboard, ride logging, statistics and GPX/CSV export
+- Crash detection with SOS SMS
+- Clock and weather on the cluster when navigation is idle
 
-The application name is **REDLINE**. Pushplekh is credited as maintainer in
-About, with attribution to original author Arjun KR (mrwick).
-Version name and monotonically increasing version code are maintained in
-`android\gradle.properties`. Current version: **0.1.11 / code 12**.
-Increment the code for each distributed update, not every rebuild.
+Local-only: no cloud service and no account. Features marked untested in `NOTES.md`
+have not yet been confirmed on a vehicle.
 
-Create your release key privately with Android Studio's **Generate Signed
-Bundle / APK** wizard, or `keytool`. Keep the keystore outside the repository,
-back it up securely, and reuse that same key for future updates. Never commit
-the key, passwords, signing configuration containing secrets, or debug keys.
+## Install
 
-For command-line signing, provide all four environment variables in the build
-process: `REDLINE_KEYSTORE_PATH` (absolute path), `REDLINE_KEYSTORE_PASSWORD`,
-`REDLINE_KEY_ALIAS`, and `REDLINE_KEY_PASSWORD`. On GitHub Actions, supply
-passwords through repository secrets and materialize the key only on the runner.
-Partial signing configuration fails explicitly.
+Download the APK from the GitHub release, install it, then follow the onboarding
+wizard to grant permissions and pair the cluster. Close or disable the official
+Suzuki app so both apps do not compete for the Bluetooth link.
+
+## Version
+
+Version name and monotonically increasing version code are kept in
+`android\gradle.properties`. Current version: **0.1.18 / code 19**.
+Increment the code for every distributed build.
+
+## Building
 
 From the `android` directory:
+
+```powershell
+.\gradlew.bat :app:testDebugUnitTest :app:assembleDebug --console=plain
+```
+
+The debug APK is written to `app\build\outputs\apk\debug\app-debug.apk`.
+
+### Release builds
+
+Create a release key privately with Android Studio's **Generate Signed Bundle / APK**
+wizard, or `keytool`. Keep the keystore outside the repository, back it up securely,
+and reuse it for future updates. Never commit keys, passwords or signing
+configuration containing secrets.
+
+Provide all four environment variables to the build: `REDLINE_KEYSTORE_PATH`
+(absolute path), `REDLINE_KEYSTORE_PASSWORD`, `REDLINE_KEY_ALIAS` and
+`REDLINE_KEY_PASSWORD`. On GitHub Actions, supply them through repository secrets.
+Partial signing configuration fails explicitly.
 
 ```powershell
 .\gradlew.bat :app:assembleRelease --console=plain
 ```
 
-With signing configured, the output is
-`app\build\outputs\apk\release\app-release.apk`.
+With signing configured, the output is `app\build\outputs\apk\release\app-release.apk`.
 **Without signing variables this intentionally produces an unsigned
 `app-release-unsigned.apk`; it is not installable or ready to publish.**
-Do not substitute a debug-signed APK for a public release.
+Do not publish a debug-signed APK.
 
-Before publishing, verify the signed APK with Android SDK `apksigner verify
---verbose --print-certs`, confirm the version in `output-metadata.json`, and
-test that exact APK on a stationary bike. Attach the signed APK as
-`redline-0.1.11-code12.apk` to GitHub release tag `v0.1.11`, with a SHA-256
-checksum and release notes. Retain
+Before publishing, verify the APK with `apksigner verify --verbose --print-certs`,
+confirm the version in `output-metadata.json`, and test that exact APK on a stationary
+vehicle. Attach it as `redline-<version>-code<code>.apk` to release tag `v<version>`,
+with a SHA-256 checksum and release notes. Keep
 `app\build\outputs\mapping\release\mapping.txt` privately for crash decoding.
-The release package is `dev.mrwick.redline`; debug uses
-`dev.mrwick.redline.debug`, so switching to release does not migrate debug data.
+The release package is `dev.mrwick.redline`; debug uses `dev.mrwick.redline.debug`,
+so switching to release does not migrate debug data.
 
-This configuration does not constitute a public-repository readiness review.
-Before making a repository public, review tracked files and history for private
-data, OEM artifacts and licensing/redistribution requirements; preserve upstream
-attribution and license notices. No repository or release is published by building.
+## Protocol overview
 
-## For a new conversation picking this up
+- One vendor GATT service `0xFFF0`: `0xFFF1` (write, phone → cluster) and `0xFFF2`
+  (notify, cluster → phone).
+- Every frame is 30 bytes: `0xA5` header, ASCII type byte, body, checksum, `0x7F` terminator.
+- Checksum: `sum(payload[1:28]) mod 256`.
+- Frame types: `a531` navigation display, `a532` call, `a533` phone heartbeat,
+  `a534` missed call, `a535` message, `a536` identity, `a537` cluster telemetry.
+- The cluster only sends notifications after the phone writes first.
+- The OEM app uses the cloud only for map-licence checks; vehicle data flows over BLE.
 
-If you're a fresh Claude agent loading this project for the first time, **read in this order**:
+Full specification: `NOTES.md`. `tools/protocol.py` is the reference encoder/decoder;
+the Kotlin port in `android/` mirrors it.
 
-1. **`CLAUDE.md`** (this directory) — project rules. The hard "no assumptions" rule especially.
-2. **This README** — what's the project, what's been done.
-3. **`android/HANDOFF.md`** — Android app structure + how to build/run.
-4. **`SMOKE_TEST.md`** — the morning bike test.
-5. **`NOTES.md`** — protocol knowledge (the polished spec).
-6. **`DISCOVERIES.md`** — chronological log including walked-back wrong assumptions.
-7. **`docs/superpowers/specs/2026-05-24-gixxerbridge-android-app-design.md`** — design spec for the app.
-8. **`docs/superpowers/specs/2026-05-24-assumptions-log.md`** — list of every unverified assumption with verification plan.
-9. **`docs/superpowers/specs/2026-05-23-phase1-protocol-understanding-design.md`** — original Phase 1 design spec.
-10. **`LOCAL_NOTES.md`** (gitignored) — PII (bike MAC, serial). Local only.
-
-## Goal — three phases
-
-| Phase | Goal | Status |
-|-------|------|--------|
-| **Phase 1** | Understand the BLE protocol fully. Document it so an encoder can be implemented from spec alone. | ✅ **Done** — all 7 frame types decoded, `tools/protocol.py` is the canonical reference |
-| **Phase 2** | Android app that translates Google Maps notifications to Suzuki BLE frames. | ✅ **Built overnight 2026-05-24** — see REDLINE in `android/` |
-| **Phase 3-A** | Custom cluster display — clock/weather/now-playing rendered to the bike's text fields when nav idle. | ✅ **Built overnight 2026-05-24** — `IdleClockGenerator` + alternating now-playing cycle |
-| **Phase 3-B** | Telemetry dashboard on phone (speed / fuel / odo / trip from a537). | ✅ **Built overnight 2026-05-24** — Dashboard tab + Stats tab + ride analytics |
-
-## Current state (as of 2026-05-23)
-
-### What's confirmed (with evidence)
-
-- **Bike has NO SIM card** (Arjun confirmed by physical inspection; Suzuki India product page describes connectivity as Bluetooth-only). The bike does NOT phone home over cellular. All data exchange with Suzuki cloud happens via the paired phone.
-- **BLE protocol surface** (from direct GATT walk): one vendor service `0xFFF0` with two characteristics:
-  - `0xFFF1` (write) — phone → bike
-  - `0xFFF2` (notify) — bike → phone
-  - Plus standard GAP, GATT, Device Information services (metadata only).
-- **Frame structure** (every message is exactly 30 bytes): `0xA5` header + ASCII type byte + body + checksum + `0x7F` terminator.
-- **Checksum algorithm** (confirmed from decompiled source `SuzukiApplication.a()`):
-  `checksum = sum(payload[1:28]) mod 256`
-  Plus a `K.g`-gated INVERTED variant `255 - (sum % 256)` that exists but we haven't seen used.
-- **Message types observed**:
-  - `a531` — display refresh (time + distance + maneuver byte) — from `A0.D()` in source
-  - `a533` — phone heartbeat (every 1 sec, sent 3× per tick) — from `f.java` (plus other variant we haven't traced)
-  - `a536` — user identity push
-  - `a537` — bike heartbeat (every 5 sec, response-driven — bike doesn't push until phone writes first)
-- **Engine coolant temperature** is encoded at byte position 25 of `a537` notifies (degrees C, 83-89 °C observed range).
-- **Notify is response-driven**: bike doesn't push notifies until the Central writes at least one message. Passive listener gets zero notifications.
-- **"Searching for network"** on the cluster appears when the signal-status digit (`A0.H1` in source) is `"0"`. Set when no cellular signal. Real cellular SIM with active signal sets it to `"1"`-`"3"`.
-- **App package**: `suzuki.com.suzuki` (APKs in `apk/`, decompiled in `decompiled/jadx-out/`).
-- **App uses FastBle library** (`com.clj.fastble.*`) for BLE — most Suzuki class names are NOT obfuscated, big win for static analysis.
-
-### Walked-back wrong assumptions (documented in DISCOVERIES.md)
-
-1. *"Wireshark labels the bike's chars as PKOC/Aliro"* — dissector misfire. Real UUIDs are simple `0xFFFx` vendor space.
-2. *"Bike has embedded SIM in TCU, fuel/odo data comes from cloud"* — bike has no SIM. Cloud is fed via paired phone.
-3. *"Position 14 of a533 is the network YES/NO flag"* — actually SMS-present (i0) and Call-present (j0) indicators, inverted semantics (`'N'`=present, `'Y'`=cleared).
-4. *"a533 pos 21=0x02 and pos 22=0xc9 are the signal-strength bytes"* — likely wrong. The real signal-status is the ASCII digit in `A0.H1` (which is `c.I` set by `B.java`'s PhoneStateListener) embedded into a531 templates. The 0x02/0xc9 may be coincidence from a different message variant.
-5. *"Phase 3-B telemetry dashboard is dead because bike doesn't push telemetry"* — partial truth. Bike pushes engine TEMP via notify (slow), but appears to not push RPM/throttle/fuel. Still need to verify by capturing during more events.
-
-### What's open / unknown
-
-- **Real arrow byte values**: our captures always had degraded signal (no SIM or only WiFi), so the maneuver ID byte was always `0x2e` (`.`). We have the maneuver-ID → icon-ID mapping from `C0897z.java` but haven't seen real values on the wire.
-- **A531 template field mapping**: the construction is `"?110" + p0 + m0 + n0 + "000" + q0 + o0 + str + str2 + "00000"`. We know what type of data each field carries roughly (time, distance, units) but not the exact instance-field origins.
-- **Where fuel/odo/trip/last-location values come from**: not BLE (proven by exhaustive opcode analysis). Not bike-cellular (no SIM). Three remaining hypotheses (cloud-via-phone, stale local cache, BLE-event-we-didn't-trigger) — none verified.
-- **K.g flag effect on checksum**: code shows alternate `255 - sum%256` variant; never observed in captures.
-
-## File map
+## Repository map
 
 ```
-suzuki-connect-re/
-├── README.md                       # ← you are here. Start-here guide.
-├── CLAUDE.md                       # Project rules (NO ASSUMPTIONS, etc.)
-├── NOTES.md                        # Living protocol spec (current best understanding)
-├── DISCOVERIES.md                  # Chronological journey + walked-back assumptions
-├── LOCAL_NOTES.md                  # PII (bike MAC, serial). Gitignored.
-├── .gitignore
-├── apk/                            # 4 APK splits (gitignored — copyrighted)
-├── decompiled/                     # JADX output, 6751 Java files (gitignored)
-├── captures/                       # HCI snoop pcaps + experiment logs (gitignored — PII)
-│                                   #   3 key captures also backed up to ~/.suzuki-re-backups/
-├── frida-scripts/
-│   └── ride_capture.js             # JS hooks for TX/RX BLE calls + nav-state flags + signal/weather updates. Pair with HCI snoop log; cross-reference wire bytes ↔ Java-side semantic events during a ride.
-├── tools/
-│   ├── setup-laptop.sh             # M0: pacman/yay/pip install script (idempotent)
-│   ├── gatt_walk.py                # Connect to bike, enumerate all services/chars (used in M1.6)
-│   ├── passive_listen.py           # Subscribe to notify, no writes (proved bike is response-driven)
-│   ├── provoke_and_listen.py       # Subscribe + identity + heartbeat loop (gets bike to stream)
-│   ├── send_custom.py              # Replay captured a531 / send modified text
-│   ├── phase_b_experiment.py       # First Phase B trial (replay + custom name)
-│   ├── phase_b_with_network.py     # Second trial — send "network YES" heartbeat (didn't work)
-│   ├── bike_full_diag.py           # Comprehensive batched experiment (all forge attempts)
-│   └── forge_network.py            # Latest: forge cellular signal bytes (UNTESTED, may need fix per M1 findings)
-├── tests/                          # (Empty — pytest scaffolding planned for M5)
-└── docs/
-    ├── ble-primer.md               # (TBD — to be written when M5 begins)
-    ├── captures/                   # Capture-session annotations
-    └── superpowers/
-        ├── specs/2026-05-23-phase1-protocol-understanding-design.md
-        └── plans/2026-05-23-phase1-protocol-understanding.md
+├── README.md          # This file
+├── NOTES.md           # Protocol specification (current best understanding)
+├── DISCOVERIES.md     # Chronological research log, including corrected assumptions
+├── SMOKE_TEST.md      # On-vehicle test checklist
+├── TROUBLESHOOTING.md # Common problems
+├── android/           # REDLINE app (see android/HANDOFF.md)
+├── tools/             # Python protocol reference and BLE research tools
+├── frida-scripts/     # Runtime hooks used during protocol research
+├── tests/             # Python tests
+└── docs/              # Design specs, plans and assumption log
 ```
 
-## Hardware / setup state
+OEM APKs, decompiled sources and captures are intentionally not included.
 
-- **Bike**: Suzuki Gixxer SF 150 (2023). BLE MAC: see `LOCAL_NOTES.md`. Cluster shows nav arrows ONLY when paired phone has real cellular signal.
-- **Spare phone**: Redmi K20 Pro running LineageOS Android 16, KSU root, frida-server 17.9.10 installed, Suzuki Connect app installed + paired with bike. HCI snoop log enabled. SIM card now installed (after initial work was done with WiFi-only).
-- **Laptop**: Arch Linux. Bluetooth must be unblocked manually (`rfkill unblock bluetooth`) before each BLE session — it's soft-blocked at boot. adb root works after enabling "Rooted debugging" in LineageOS dev options.
-- **Tooling installed**: JADX (AUR), wireshark-qt, android-tools, Python venv at `.venv/` with bleak / frida-tools / pytest / pyshark / cryptography / mitmproxy.
+## Research method
 
-## Quick-start for next session
+Facts in `NOTES.md` are backed by captures, decompiled OEM code or on-vehicle tests;
+hypotheses are labelled as such. When a claim proves wrong, the correction is logged
+in `DISCOVERIES.md` rather than silently rewritten.
 
-```bash
-# Activate Python venv
-source ~/coding/projects/suzuki-connect-re/.venv/bin/activate
+## Credits
 
-# If you need bike-on session: unblock laptop Bluetooth first
-sudo rfkill unblock bluetooth   # ← only this needs sudo; Arjun should run it
-bluetoothctl power on
+Maintained by **Pushplekh**. Original protocol research and app by **Arjun KR (mrwick)**.
 
-# Verify bike visible (key on)
-python tools/gatt_walk.py --scan
-# Should see the bike's MAC + name "SBXXXXXXXXXX"
+## Disclaimer
 
-# Re-pull HCI snoop log after a session (requires adb root, already enabled)
-adb pull /data/misc/bluetooth/logs/btsnoop_hci.log captures/<name>.pcap
-
-# Inspect a capture
-tshark -r captures/<name>.pcap -Y 'btatt' -T fields -e frame.time_relative -e btatt.opcode -e btatt.value
-
-# Validate Phase 2 assumption A1 (Maps nav notification shape) on this phone.
-# Writes captures/maps-notification-dump-<ts>.md. Use --watch while you start
-# a Google Maps navigation to capture the live turn notification; --save-raw
-# also archives the full dumpsys blob for offline grep.
-python tools/dump_maps_notification.py [--watch] [--save-raw]
-```
-
-## Immediate next-session priorities
-
-1. **Trace `C.I` / `A0.H1` through A0.D() template fields** to identify the exact byte position carrying the signal-status digit. Then build a corrected forge tool that sets this byte to `"1"` (good signal). This should defeat "Searching for network" and let us send real arrow bytes.
-2. **Test the existing `forge_network.py`** built last session, as a baseline (expected to fail per M1 findings — but confirms the failure mode).
-3. **Look for the second a533 construction path** — `f.java` produces messages that don't match our captures, so there's another path that does. Likely in `A0.java` or a related file.
-4. **mitmproxy + Frida SSL pinning bypass** on Suzuki Connect to settle the fuel/odo/trip data source question.
-5. **Capture an actual ride** to map turn-arrow message variations (only needed if we can't forge them).
-
-## Git workflow
-
-This repo lives independently of `~/my-life`. Commits happen per milestone or per significant discovery — not weekly. Personal Git identity (use `personal` alias). All commits authored as `Arjun KR <arjunkrishnaraj123@gmail.com>`. **No "Co-Authored-By" lines.**
-
-## Communication / collaboration style
-
-See `CLAUDE.md` for the hard rules. Briefly:
-- **No assumptions**: verify before stating, mark hypotheses as hypotheses.
-- **Document the journey**: when a prior claim is contradicted, add an entry to `DISCOVERIES.md` with what was assumed, what was actually true, and what evidence corrected it. Don't silently rewrite the spec.
-- **Per Arjun's general preferences** (see global `~/.claude/CLAUDE.md`): direct, no sugarcoating, no emojis unless asked, no "Co-Authored-By" in commits.
+Not affiliated with or endorsed by Suzuki. Educational project; use at your own risk
+and never interact with the phone while riding. Before redistribution, review tracked
+files and history for private data, OEM material and licensing requirements, and keep
+upstream attribution.

@@ -130,7 +130,6 @@ fun DiagnosticsScreen() {
                     try {
                         val saved = AppGraph.settings(ctx).pairedSuzuki.first()
                         val capacity = AppGraph.settings(ctx).fuelCapacityL.first()
-                        val navigationText = AppGraph.settings(ctx).navigationTextInEta.first()
                         val file = withContext(Dispatchers.IO) {
                             DiagnosticBundle.create(
                                 File(ctx.filesDir, "diag"),
@@ -138,7 +137,7 @@ fun DiagnosticsScreen() {
                                 "CapturedMs=${System.currentTimeMillis()}\n" +
                                     "${dev.mrwick.redline.util.BuildIdentity.capture(ctx)}\n" +
                                     "Profile=${saved.profile.description}\n" +
-                                    "NavigationTextInEta=$navigationText (smart: arrival time for normal left/right/straight or unknown action; text for detailed guidance; ETA label unchanged)\n" +
+                                    "NavigationTextInEta=always (smart: arrival time for normal left/right/straight or unknown action; text for detailed guidance; ETA label unchanged)\n" +
                                     "RoundaboutText=EXTn; exit-now uses NOW in blank next-distance field only; supplied distances preserved; ordinal may come from previous fresh roundabout (ROUNDABOUT_CONTEXT)\n" +
                                     "TankCapacityLitres=$capacity (app setting, not measured by cluster)\n" +
                                     "Protocol=${AppGraph.bleClient?.protocol}\n" +

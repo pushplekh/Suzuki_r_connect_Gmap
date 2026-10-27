@@ -225,6 +225,126 @@ class CallAlertsTest {
         assertEquals(1, sent)
     }
 
+    @Test fun ringingHoldsNavigationUntilAnsweredOrRemovedAndIsBounded() {
+        var now = 1_000L
+        val tracker = CallAlertTracker { now }
+        tracker.posted(CallAlert("ring", "TEST", CallPhase.RINGING, true))
+        assertEquals(1_000L, tracker.state.value.ringingSinceMs)
+        assertTrue(tracker.state.value.holdsNavigation(now))
+        now += 5_000
+        tracker.posted(CallAlert("missed", "OTHER", CallPhase.MISSED, false))
+        assertEquals(1_000L, tracker.state.value.ringingSinceMs)
+        assertFalse(tracker.state.value.holdsNavigation(1_000L + CallAlertSnapshot.MAX_RING_REFRESH_MS))
+        tracker.posted(CallAlert("ring", "TEST", CallPhase.ONGOING, true))
+        assertNull(tracker.state.value.ringingSinceMs)
+        assertFalse(tracker.state.value.holdsNavigation(now))
+        tracker.posted(CallAlert("ring2", "TEST", CallPhase.RINGING, false))
+        assertTrue(tracker.state.value.holdsNavigation(now))
+        tracker.removed("ring2")
+        assertFalse(tracker.state.value.holdsNavigation(now))
+    }
+
+    @Test fun ringingCallIsResentEverySecondUntilBoundButAnsweredCallIsNot() = runTest {
+        val ringing = CallFrame("TEST", isWhatsapp = true, state = '1'.code)
+        val missed = MissedCallFrame("OTHER", 1, false)
+        val snapshot = CallAlertSnapshot(frames = listOf(missed, ringing), ringingSinceMs = 0)
+        val sent = mutableListOf<Pair<Long, Any>>()
+        snapshot.sendAndRefreshWhileRinging({ testScheduler.currentTime }) { sent.add(testScheduler.currentTime to it) }
+        assertEquals(6, sent.count { it.first <= 600 })
+        val refreshes = sent.filter { it.first > 600 }
+        assertTrue(refreshes.all { it.second == ringing })
+        assertEquals(listOf(1_600L, 2_600L), refreshes.take(2).map { it.first })
+        assertTrue(refreshes.last().first < CallAlertSnapshot.MAX_RING_REFRESH_MS)
+        assertEquals((CallAlertSnapshot.MAX_RING_REFRESH_MS - 600) / 1_000, refreshes.size.toLong())
+
+        var answeredSends = 0
+        CallAlertSnapshot(frames = listOf(CallFrame("TEST", state = '2'.code)))
+            .sendAndRefreshWhileRinging({ testScheduler.currentTime }) { answeredSends++ }
+        assertEquals(3, answeredSends)
+    }
+
+    @Test fun telephonyRingingShowsCallerUntilAnsweredThenOngoing() {
+        val tracker = CallAlertTracker { 0 }
+        tracker.telephony(TelephonyCallState.RINGING, null)
+        tracker.telephony(TelephonyCallState.RINGING, "Mom")
+        tracker.telephony(TelephonyCallState.RINGING, null)
+        val ringing = tracker.state.value.frames.single() as CallFrame
+        assertEquals("Mom", ringing.number)
+        assertEquals('1'.code, ringing.state)
+        assertFalse(ringing.isWhatsapp)
+        assertTrue(tracker.state.value.holdsNavigation(0))
+
+        tracker.telephony(TelephonyCallState.OFFHOOK, "Mom")
+        assertEquals('2'.code, (tracker.state.value.frames.single() as CallFrame).state)
+        assertFalse(tracker.state.value.holdsNavigation(0))
+
+        tracker.telephony(TelephonyCallState.IDLE, null)
+        assertTrue(tracker.state.value.frames.isEmpty())
+        assertFalse(tracker.state.value.inCall)
+    }
+
+    @Test fun telephonyUnansweredCallBecomesMissedAndCountsUntilCleared() {
+        val tracker = CallAlertTracker { 0 }
+        repeat(2) {
+            tracker.telephony(TelephonyCallState.RINGING, "+911234567890")
+            tracker.telephony(TelephonyCallState.IDLE, null)
+        }
+        val missed = tracker.state.value.frames.single() as MissedCallFrame
+        assertEquals("+911234567890", missed.name)
+        assertEquals(2, missed.missedCount)
+        assertFalse(missed.isWhatsapp)
+        assertFalse(tracker.state.value.inCall)
+
+        tracker.clearTelephonyMissed()
+        assertEquals(0, (tracker.state.value.frames.single() as MissedCallFrame).missedCount)
+        assertTrue(tracker.state.value.cleared)
+    }
+
+    @Test fun outgoingTelephonyCallIsNotShown() {
+        val tracker = CallAlertTracker { 0 }
+        tracker.telephony(TelephonyCallState.OFFHOOK, null)
+        tracker.telephony(TelephonyCallState.IDLE, null)
+        assertTrue(tracker.state.value.frames.isEmpty())
+        assertEquals(0, tracker.state.value.revision)
+    }
+
+    @Test fun telephonyReplacesDialerRingingAndDialerMissedReplacesTelephonyMissed() {
+        val tracker = CallAlertTracker { 0 }
+        tracker.posted(CallAlert("dialer", "Dialer name", CallPhase.RINGING, false))
+        tracker.telephony(TelephonyCallState.RINGING, "Contact")
+        assertEquals("Contact", (tracker.state.value.frames.single() as CallFrame).number)
+        tracker.posted(CallAlert("wa", "WA", CallPhase.RINGING, true))
+        assertEquals(2, tracker.state.value.frames.size)
+        tracker.removed("wa")
+        tracker.removed("dialer")
+
+        tracker.telephony(TelephonyCallState.IDLE, null)
+        tracker.posted(CallAlert("dialer-missed", "Contact", CallPhase.MISSED, false, count = 1))
+        assertEquals(1, (tracker.state.value.frames.single() as MissedCallFrame).missedCount)
+        tracker.removed("dialer-missed")
+        assertEquals(0, (tracker.state.value.frames.single() as MissedCallFrame).missedCount)
+        assertTrue(tracker.state.value.cleared)
+    }
+
+    @Test fun listenerReconnectDoesNotDropTelephonyCall() {
+        val tracker = CallAlertTracker { 0 }
+        tracker.telephony(TelephonyCallState.RINGING, "Mom")
+        tracker.retainKeys(emptySet())
+        assertEquals("Mom", (tracker.state.value.frames.single() as CallFrame).number)
+    }
+
+    @Test fun telephonyCallerPrefersAsciiContactNameThenNumber() {
+        assertEquals("Mom", CallAlerts.telephonyCaller("Mom", "+911234567890"))
+        assertEquals("+911234567890", CallAlerts.telephonyCaller("\u0928\u093e\u092e", "+911234567890"))
+        assertNull(CallAlerts.telephonyCaller(null, null))
+    }
+
+    @Test fun removedMissedDialerNotificationIsRecognizedForClearing() {
+        assertTrue(CallAlerts.looksMissed(sbn(notification("Missed call", "Mom"))))
+        assertTrue(CallAlerts.looksMissed(sbn(notification("Mom", "", Notification.CATEGORY_MISSED_CALL))))
+        assertFalse(CallAlerts.looksMissed(sbn(notification("Mom", "Incoming call"))))
+    }
+
     private fun notification(
         title: CharSequence,
         text: String,

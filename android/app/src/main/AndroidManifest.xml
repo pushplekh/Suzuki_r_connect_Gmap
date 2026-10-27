@@ -27,6 +27,13 @@
     <!-- Notification listener gives us: nav (Google Maps), calls (system Phone), SMS (system Messages), other apps -->
     <!-- NB: per assumptions log A9, we explicitly do NOT request READ_SMS / RECEIVE_SMS -->
 
+    <!-- SIM call alerts: PHONE_STATE broadcast, incoming number and contact name -->
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <uses-permission android:name="android.permission.READ_CALL_LOG" />
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <!-- Optional auto-reply mode that rejects the ringing call before texting -->
+    <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
+
     <!-- Weather: outbound HTTP -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -34,9 +41,7 @@
     <!-- Optional: phone location for weather (single-shot, only when user requests location-aware weather) -->
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
-    <!-- Safety: SOS path sends an SMS to the configured emergency contact when a crash is detected.
-         Per Phase 1 research (A9), Play Store doesn't allow SEND_SMS for non-default-SMS apps; this
-         app is sideloaded so the user grants it manually. -->
+    <!-- SOS crash SMS and optional call auto-reply SMS. Sideloaded app; the user grants it manually. -->
     <uses-permission android:name="android.permission.SEND_SMS" />
 
     <!-- Reliability: when the user swipes the app away from Recents we re-launch

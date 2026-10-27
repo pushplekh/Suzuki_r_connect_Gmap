@@ -34,6 +34,7 @@ import dev.mrwick.redline.nav.NavMux
 import dev.mrwick.redline.nav.WelcomeFrame
 import dev.mrwick.redline.notifications.NowPlayingProvider
 import dev.mrwick.redline.notifications.CallAlerts
+import dev.mrwick.redline.notifications.TelephonyCallSource
 import dev.mrwick.redline.protocol.CallFrame
 import dev.mrwick.redline.protocol.MissedCallFrame
 import dev.mrwick.redline.protocol.IdentityFrame
@@ -90,6 +91,7 @@ class BikeBridgeService : LifecycleService() {
     private lateinit var bleClient: BleClient
     private lateinit var frameWriter: FrameWriter
     private lateinit var phoneState: PhoneState
+    private lateinit var telephonyCalls: TelephonyCallSource
     private lateinit var weatherCache: WeatherCache
     private lateinit var heartbeatLoop: HeartbeatLoop
     private lateinit var idleClock: IdleClockGenerator
@@ -100,6 +102,8 @@ class BikeBridgeService : LifecycleService() {
     private lateinit var rideLogger: RideLogger
     private lateinit var sos: SosController
     private lateinit var crashDetector: CrashDetector
+    private lateinit var voiceAlerts: dev.mrwick.redline.system.VoiceAlerts
+    private lateinit var autoReply: dev.mrwick.redline.notifications.AutoReplyController
     private var crashDetectorJob: Job? = null
     private val demoSource = DemoTelemetrySource()
 
@@ -151,6 +155,22 @@ class BikeBridgeService : LifecycleService() {
         }
         frameWriter = FrameWriter()
         phoneState = PhoneState(applicationContext).also { it.start() }
+        val autoReplyEnabledFlow = settings.autoReplyEnabled.stateIn(lifecycleScope, SharingStarted.Eagerly, false)
+        val autoReplyRejectFlow = settings.autoReplyRejectCall.stateIn(lifecycleScope, SharingStarted.Eagerly, false)
+        val autoReplyMessageFlow = settings.autoReplyMessage
+            .stateIn(lifecycleScope, SharingStarted.Eagerly, Settings.DEFAULT_AUTO_REPLY_MESSAGE)
+        autoReply = dev.mrwick.redline.notifications.AutoReplyController(
+            applicationContext,
+            configProvider = {
+                dev.mrwick.redline.notifications.AutoReplyPolicy.Config(
+                    enabled = autoReplyEnabledFlow.value,
+                    rejectCall = autoReplyRejectFlow.value,
+                    bikeConnected = bleClient.state.value is ConnectionState.Ready,
+                )
+            },
+            messageProvider = { autoReplyMessageFlow.value.ifBlank { Settings.DEFAULT_AUTO_REPLY_MESSAGE } },
+        )
+        telephonyCalls = TelephonyCallSource(applicationContext, autoReply::onTelephonyState).also { it.start() }
         lifecycleScope.launch {
             while (isActive) {
                 bleClient.state.first { it is ConnectionState.Ready }
@@ -171,6 +191,8 @@ class BikeBridgeService : LifecycleService() {
             },
         ).also { it.start(lifecycleScope) }
 
+        val speedLimitFlow: StateFlow<Int> = settings.speedLimitKmh
+            .stateIn(lifecycleScope, SharingStarted.Eagerly, 0)
         heartbeatLoop = HeartbeatLoop(
             phoneBatteryProvider = { phoneState.batteryPercent.value to phoneState.isCharging.value },
             signalBarsProvider = { phoneState.signalBars.value },
@@ -179,6 +201,7 @@ class BikeBridgeService : LifecycleService() {
             smsPendingProvider = { AppGraph.debugSmsPending },
             callPendingProvider = { AppGraph.debugCallPending || CallAlerts.tracker.state.value.cleared },
             weatherProvider = { weatherCache.currentEncoded() },
+            speedLimitProvider = { speedLimitFlow.value },
         )
 
         // Sample the active media session every 5s; cheap, idempotent, and only
@@ -387,6 +410,23 @@ class BikeBridgeService : LifecycleService() {
 
         // Identity is acknowledged inside BleClient before Ready. Then welcome + DND.
         // On Disconnected: restore the user's previous DND filter.
+        voiceAlerts = dev.mrwick.redline.system.VoiceAlerts(applicationContext)
+        val voicePolicy = dev.mrwick.redline.system.VoiceAlertPolicy()
+        val voiceAlertsFlow: StateFlow<Boolean> = settings.voiceAlerts
+            .stateIn(lifecycleScope, SharingStarted.Eagerly, true)
+        val pairedFlow: StateFlow<PairedSuzuki?> = settings.pairedSuzuki
+            .stateIn(lifecycleScope, SharingStarted.Eagerly, null)
+        lifecycleScope.launch {
+            TelemetryRepository.latest.collect { frame ->
+                val byte24 = frame?.raw?.getOrNull(24)?.toInt()?.and(0xFF) ?: return@collect
+                if (bleClient.state.value !is ConnectionState.Ready) return@collect
+                val isEAccess = pairedFlow.value?.profile?.effectiveModel == dev.mrwick.redline.protocol.SuzukiModel.E_ACCESS
+                voicePolicy.onTelemetryByte24(byte24, isEAccess)?.let {
+                    AppLog.i("VoiceAlerts", "low-level trigger byte24=0x${"%02x".format(byte24)} eAccess=$isEAccess")
+                    if (voiceAlertsFlow.value) voiceAlerts.speak(it)
+                }
+            }
+        }
         //
         // "Fresh" is defined as: this Ready transition wasn't immediately preceded
         // by another Ready (i.e. it's not a no-op re-emission). We treat every
@@ -401,6 +441,7 @@ class BikeBridgeService : LifecycleService() {
                     is ConnectionState.Ready -> {
                         val isFresh = !lastWasReady
                         lastWasReady = true
+                        voicePolicy.onReady()?.let { if (voiceAlertsFlow.value) voiceAlerts.speak(it) }
 
                         val name = settings.riderName.first()
                         if (isFresh) {
@@ -427,6 +468,7 @@ class BikeBridgeService : LifecycleService() {
                     is ConnectionState.Failed,
                     -> {
                         lastWasReady = false
+                        voicePolicy.onDisconnected()?.let { if (voiceAlertsFlow.value) voiceAlerts.speak(it) }
                         dnd.restore()
                         // End any active ride; the watchdog would catch this in
                         // <= 10 min, but ending immediately on disconnect gives
@@ -496,7 +538,7 @@ class BikeBridgeService : LifecycleService() {
             combine(CallAlerts.tracker.state, bleClient.state) { alerts, link -> alerts to link }
                 .collectLatest { (alerts, link) ->
                     if (link !is ConnectionState.Ready || alerts.frames.isEmpty()) return@collectLatest
-                    alerts.sendBurst { frame ->
+                    alerts.sendAndRefreshWhileRinging({ System.nanoTime() / 1_000_000 }) { frame ->
                         val bytes = when (frame) {
                             is CallFrame -> frame.encode()
                             is MissedCallFrame -> frame.encode()
@@ -534,7 +576,7 @@ class BikeBridgeService : LifecycleService() {
         val currentNav = dev.mrwick.redline.nav.navigationDisplayFlow(
             navMux.frame,
             dev.mrwick.redline.nav.MapsNavSource.parsed,
-            settings.navigationTextInEta,
+            kotlinx.coroutines.flow.flowOf(true),
             dev.mrwick.redline.nav.MapsNavSource.freshness,
         ).onEach { rendered ->
             if (rendered?.traceId != null) {
@@ -543,66 +585,26 @@ class BikeBridgeService : LifecycleService() {
                     "nextFieldPolicy=NOW-only-for-exit-without-distance totalDistancePreserved=true displayAcceptance=unobserved")
             }
         }.stateIn(lifecycleScope, SharingStarted.Eagerly, null)
-        lifecycleScope.launch {
-            var lastText: String? = null
-            var replacedIdentity = false
-            kotlinx.coroutines.flow.combine(
-                kotlinx.coroutines.flow.combine(settings.experimentalInstructionText, settings.navigationTextInEta) { banner, text ->
-                    banner && !text
-                },
-                dev.mrwick.redline.nav.MapsNavSource.parsed,
-                bleClient.state,
-            ) { enabled, parsed, state ->
-                Triple(enabled, parsed, state is ConnectionState.Ready)
-            }.collect { (enabled, parsed, ready) ->
-                if (!ready) {
-                    lastText = null
-                    replacedIdentity = false
-                    return@collect
-                }
-                val text = if (enabled) dev.mrwick.redline.nav.clusterInstructionText(parsed) else null
-                if (text != null && text != lastText) {
-                    val accepted = frameWriter.enqueue(
-                        FrameWriter.Entry(
-                            FrameWriter.Priority.URGENT,
-                            IdentityFrame(name = text, isFresh = false).encode(),
-                            note = "experimental-nav-text trace=${parsed?.traceId}",
-                        ),
-                    )
-                    AppLog.i(
-                        "NavTrace",
-                        "TEXT_EXPERIMENT trace=${parsed?.traceId} field=identity-name text=${NavDiagnostics.quoted(text)} " +
-                            "queued=$accepted displayAcceptance=unobserved connectedSuffixPossible=true",
-                    )
-                    if (accepted) {
-                        lastText = text
-                        replacedIdentity = true
-                    }
-                } else if (text == null && replacedIdentity) {
-                    val accepted = frameWriter.enqueue(
-                        FrameWriter.Entry(
-                            FrameWriter.Priority.URGENT,
-                            IdentityFrame(name = settings.riderName.first(), isFresh = false).encode(),
-                            note = "experimental-nav-text-restore",
-                        ),
-                    )
-                    AppLog.i("NavTrace", "TEXT_EXPERIMENT restore-rider-name queued=$accepted displayAcceptance=unobserved")
-                    if (accepted) {
-                        lastText = null
-                        replacedIdentity = false
-                    }
-                }
-            }
-        }
+        val rainAlertFlow: StateFlow<Boolean> = settings.rainAlertNav
+            .stateIn(lifecycleScope, SharingStarted.Eagerly, false)
+        val rainOverlay = dev.mrwick.redline.nav.RainAlertOverlay()
         // Periodic writes match the OEM's refresh model and re-send active nav on reconnect.
         lifecycleScope.launch {
             while (isActive) {
                 bleClient.state.first { it is ConnectionState.Ready }
-                currentNav.value?.let { nav ->
+                val shown = rainOverlay.apply(
+                    currentNav.value,
+                    enabled = rainAlertFlow.value,
+                    weatherCode = weatherCache.snapshot.value?.suzukiCode,
+                    nowMs = SystemClock.elapsedRealtime(),
+                )
+                shown?.let { nav ->
                     frameWriter.enqueue(
                         FrameWriter.Entry(
                             FrameWriter.Priority.NAV, nav.encode(),
                             note = when {
+                                nav.traceId != null && nav.maneuverId == dev.mrwick.redline.nav.RainAlertOverlay.RAIN_ICON &&
+                                    currentNav.value?.maneuverId != nav.maneuverId -> "nav trace=${nav.traceId} rain-alert"
                                 nav.traceId != null -> "nav trace=${nav.traceId}"
                                 nav.eta == "STALE " -> "nav source=stale"
                                 else -> "nav source=idle"
@@ -655,6 +657,7 @@ class BikeBridgeService : LifecycleService() {
         // mostly catches in-flight frames enqueued just before a disconnect.
         lifecycleScope.launch {
             var lastLoggedTrace: String? = null
+            var ringHoldLoggedRevision: Long? = null
             while (true) {
                 val entry = frameWriter.take()
                 if (bleClient.state.value !is ConnectionState.Ready) {
@@ -674,11 +677,6 @@ class BikeBridgeService : LifecycleService() {
                         continue
                     }
                 }
-                if (entry.note?.startsWith("display-probe ") == true && !AppGraph.suppressAutomaticDisplay()) {
-                    AppLog.w("DisplayProbe", "DROP expired or superseded test note=${entry.note}")
-                    entry.completion?.complete(false)
-                    continue
-                }
                 if (entry.callAlertRevision != null &&
                     entry.callAlertRevision != CallAlerts.tracker.state.value.revision
                 ) {
@@ -686,12 +684,16 @@ class BikeBridgeService : LifecycleService() {
                     entry.completion?.complete(false)
                     continue
                 }
-                if (entry.note?.startsWith("nav ") == true &&
-                    AppGraph.suppressAutomaticDisplay()
-                ) {
-                    AppLog.i("DisplayProbe", "HOLD automatic-display note=${entry.note}; heartbeat remains active")
-                    entry.completion?.complete(false)
-                    continue
+                if (entry.note?.startsWith("nav ") == true) {
+                    val callState = CallAlerts.tracker.state.value
+                    if (callState.holdsNavigation(System.nanoTime() / 1_000_000)) {
+                        if (ringHoldLoggedRevision != callState.revision) {
+                            ringHoldLoggedRevision = callState.revision
+                            AppLog.i("CallAlerts", "HOLD navigation while ringing revision=${callState.revision}; heartbeat remains active")
+                        }
+                        entry.completion?.complete(false)
+                        continue
+                    }
                 }
                 if (entry.note?.startsWith("nav ") == true &&
                     (currentNav.value == null || entry.navTraceId != currentNav.value?.traceId)
@@ -834,6 +836,8 @@ class BikeBridgeService : LifecycleService() {
             }
         }
         phoneState.stop()
+        telephonyCalls.stop()
+        if (::voiceAlerts.isInitialized) voiceAlerts.shutdown()
         weatherCache.stop()
         bleClient.disconnect()
         // PERF: also cancel BleClient's internal scope so any in-flight

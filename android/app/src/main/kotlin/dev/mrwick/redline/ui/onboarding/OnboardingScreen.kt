@@ -175,6 +175,21 @@ private fun PermissionsStep(onContinue: () -> Unit, onBack: () -> Unit) {
                 "Location",
                 "Record GPS tracks for your rides.",
             ))
+            add(Manifest.permission.READ_PHONE_STATE to PermSpec(
+                Manifest.permission.READ_PHONE_STATE,
+                "Phone calls",
+                "Flash incoming SIM calls on the cluster.",
+            ))
+            add(Manifest.permission.READ_CALL_LOG to PermSpec(
+                Manifest.permission.READ_CALL_LOG,
+                "Call logs",
+                "Read the incoming caller's number.",
+            ))
+            add(Manifest.permission.READ_CONTACTS to PermSpec(
+                Manifest.permission.READ_CONTACTS,
+                "Contacts",
+                "Show the caller's name instead of the number.",
+            ))
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 add(Manifest.permission.POST_NOTIFICATIONS to PermSpec(
                     Manifest.permission.POST_NOTIFICATIONS,

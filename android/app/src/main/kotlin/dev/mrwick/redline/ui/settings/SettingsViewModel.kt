@@ -27,18 +27,6 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
         .stateIn(viewModelScope, SharingStarted.Eagerly, PairedSuzuki())
     val fuelCapacityL = settings.fuelCapacityL
         .stateIn(viewModelScope, SharingStarted.Eagerly, null)
-    val experimentalInstructionText = settings.experimentalInstructionText
-        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
-    val navigationTextInEta = settings.navigationTextInEta
-        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
-
-    fun setNavigationTextInEta(enabled: Boolean) {
-        viewModelScope.launch { settings.setNavigationTextInEta(enabled) }
-    }
-
-    fun setExperimentalInstructionText(enabled: Boolean) {
-        viewModelScope.launch { settings.setExperimentalInstructionText(enabled) }
-    }
 
     fun setSuzukiModel(model: SuzukiModel) {
         viewModelScope.launch {
@@ -57,6 +45,20 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
         .stateIn(viewModelScope, SharingStarted.Eagerly, true)
     val autoDndOnConnect = settings.autoDndOnConnect
         .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    val speedLimitKmh = settings.speedLimitKmh
+        .stateIn(viewModelScope, SharingStarted.Eagerly, 0)
+    val calendarAlerts = settings.calendarAlerts
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    val autoReplyEnabled = settings.autoReplyEnabled
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    val autoReplyMessage = settings.autoReplyMessage
+        .stateIn(viewModelScope, SharingStarted.Eagerly, Settings.DEFAULT_AUTO_REPLY_MESSAGE)
+    val autoReplyRejectCall = settings.autoReplyRejectCall
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    val rainAlertNav = settings.rainAlertNav
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    val voiceAlerts = settings.voiceAlerts
+        .stateIn(viewModelScope, SharingStarted.Eagerly, true)
     val serviceIntervalKm = settings.serviceIntervalKm
         .stateIn(viewModelScope, SharingStarted.Eagerly, Settings.DEFAULT_SERVICE_INTERVAL_KM)
 
@@ -110,6 +112,34 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setAutoDndOnConnect(v: Boolean) {
         viewModelScope.launch { settings.setAutoDndOnConnect(v) }
+    }
+
+    fun setSpeedLimitKmh(v: Int) {
+        viewModelScope.launch { settings.setSpeedLimitKmh(v) }
+    }
+
+    fun setCalendarAlerts(v: Boolean) {
+        viewModelScope.launch { settings.setCalendarAlerts(v) }
+    }
+
+    fun setAutoReplyEnabled(v: Boolean) {
+        viewModelScope.launch { settings.setAutoReplyEnabled(v) }
+    }
+
+    fun setAutoReplyMessage(v: String) {
+        viewModelScope.launch { settings.setAutoReplyMessage(v) }
+    }
+
+    fun setAutoReplyRejectCall(v: Boolean) {
+        viewModelScope.launch { settings.setAutoReplyRejectCall(v) }
+    }
+
+    fun setRainAlertNav(v: Boolean) {
+        viewModelScope.launch { settings.setRainAlertNav(v) }
+    }
+
+    fun setVoiceAlerts(v: Boolean) {
+        viewModelScope.launch { settings.setVoiceAlerts(v) }
     }
 
     fun setServiceIntervalKm(km: Int) {

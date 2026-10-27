@@ -27,7 +27,7 @@ class MapsNavSessionTest {
             assertEquals(ordinal, session.parsed.value?.roundaboutExit)
             val data = session.parsed.value!!.copy(traceId = "exit")
             val rendered = withNavigationText(data.toNavFrame(), data, true)!!
-            assertEquals("EXT$ordinal  ", rendered.eta)
+            assertEquals("EXIT$ordinal ", rendered.eta)
             assertEquals("NOW ", rendered.distNext)
             runCurrent()
             advanceTimeBy(1000)

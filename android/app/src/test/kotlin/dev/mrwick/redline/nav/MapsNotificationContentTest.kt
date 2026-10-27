@@ -88,7 +88,8 @@ class MapsNotificationContentTest {
     @Test fun startingAndUnknownValuesNeverUseWholeRouteAsNextTurnOrPhoneClockAsEta() {
         val starting = parse(MapsNotificationContent("Starting navigation...", null, null, 0, 0))
         assertEquals(MapsNavigationState.STARTING, starting.navigationState)
-        assertEquals("2", starting.status)
+        // Status 2 makes the cluster show RE-ROUTING (photo 2026-10-27), so it is reserved for rerouting.
+        assertEquals("1", starting.status)
         assertEquals("      ", starting.eta)
         assertEquals("      ", normalizeEta(null, true))
         assertEquals("      ", normalizeEta("Arrive ", true))

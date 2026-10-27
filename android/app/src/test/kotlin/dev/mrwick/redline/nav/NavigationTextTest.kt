@@ -23,22 +23,22 @@ class NavigationTextTest {
 
     @Test fun actionLabelsFitTestedFieldWithoutChangingDistancesArrowOrStatus() {
         for ((text, label) in listOf(
-            "Make a U-turn" to "U-RGHT", "Slight left" to "SL-L", "Sharp right" to "HARD R",
-            "Make a right U-turn" to "U-RGHT", "Make a U-turn right" to "U-RGHT",
-            "Make a left U-turn" to "U-LEFT", "Make a U-turn left" to "U-LEFT",
-            "Make a right U\u2011turn" to "U-RGHT",
-            "Keep left" to "KEEP L", "Keep right" to "KEEP R",
+            "Make a U-turn" to "UTRGT", "Slight left" to "SLLFT", "Sharp right" to "HDRGT",
+            "Make a right U-turn" to "UTRGT", "Make a U-turn right" to "UTRGT",
+            "Make a left U-turn" to "UTLFT", "Make a U-turn left" to "UTLFT",
+            "Make a right U\u2011turn" to "UTRGT",
+            "Keep left" to "KPLFT", "Keep right" to "KPRGT",
             "Head northeast" to "NE", "Head southwest" to "SW",
-            "Take the right ramp" to "RAMP R", "Merge left" to "MERG L",
+            "Take the right ramp" to "RPRGT", "Merge left" to "MGLFT",
             "Join with Example Rd" to "MERGE",
             "Join onto Example Rd" to "MERGE",
-            "Join on the left onto Example Rd" to "MERG L",
-            "Join right onto Example Rd" to "MERG R",
+            "Join on the left onto Example Rd" to "MGLFT",
+            "Join right onto Example Rd" to "MGRGT",
             "Head toward Example Rd" to "HEAD",
-            "At the roundabout, turn left onto Example Rd" to "RB L",
-            "At the roundabout, turn right onto Example Rd" to "RB R",
-            "At the roundabout, continue straight onto Example Rd" to "RB FWD",
-            "At the roundabout, take the 3rd exit" to "EXT3",
+            "At the roundabout, turn left onto Example Rd" to "RBLFT",
+            "At the roundabout, turn right onto Example Rd" to "RBRGT",
+            "At the roundabout, continue straight onto Example Rd" to "RBFWD",
+            "At the roundabout, take the 3rd exit" to "EXIT3",
             "Exit the roundabout onto Example Rd" to "EXIT",
             "Exit the traffic circle onto Example Rd" to "EXIT",
         )) {
@@ -48,6 +48,7 @@ class NavigationTextTest {
             assertEquals(text, label.padEnd(6), frame.eta)
             assertEquals(text, original.copy(eta = frame.eta), frame)
             assertEquals(6, frame.eta.length)
+            assertEquals(text, ' ', frame.eta[5])
             assertTrue(frame.eta.all { it.code in 32..126 })
             val protocol = ClusterProtocol.LEGACY_ACCESS_BURGMAN
             val decoded = protocol.decode(protocol.toWire(frame.encode())) as NavFrame
@@ -60,11 +61,11 @@ class NavigationTextTest {
 
     @Test fun diagnostics8RoundaboutPhasesAndSideNeutralJoinUseOnlySuppliedDirections() {
         for ((instruction, arrow, text) in listOf(
-            Triple("At the roundabout, take the 2nd exit and stay on Example Rd", 45, "EXT2  "),
+            Triple("At the roundabout, take the 2nd exit and stay on Example Rd", 45, "EXIT2 "),
             Triple("Exit the roundabout onto Example Rd", 45, "EXIT  "),
-            Triple("At the roundabout, take the 4th exit and stay on Example Rd", 45, "EXT4  "),
-            Triple("At Example Rotary, take the 2nd exit onto Example Rd", 45, "EXT2  "),
-            Triple("At the roundabout, take the 3rd exit", 45, "EXT3  "),
+            Triple("At the roundabout, take the 4th exit and stay on Example Rd", 45, "EXIT4 "),
+            Triple("At Example Rotary, take the 2nd exit onto Example Rd", 45, "EXIT2 "),
+            Triple("At the roundabout, take the 3rd exit", 45, "EXIT3 "),
             Triple("Join with Example Rd", ManeuverMap.NO_MANEUVER_BYTE, "MERGE "),
         )) {
             val data = parsed(instruction)
@@ -162,7 +163,7 @@ class NavigationTextTest {
         assertNull(MapplsIdGuesser.roundaboutDirection("At the roundabout, take the 1st exit onto Left Road"))
         assertNull(MapplsIdGuesser.roundaboutDirection("At the roundabout, take the exit onto Turn Left Road"))
         assertNull(MapplsIdGuesser.roundaboutDirection("Turn left onto Roundabout Road"))
-        assertEquals("EXT1  ", navigationText(parsed("At the roundabout, turn left and take the 1st exit")))
+        assertEquals("EXIT1 ", navigationText(parsed("At the roundabout, turn left and take the 1st exit")))
         assertEquals(45, parsed("At the roundabout, turn left onto Example Rd").maneuverId)
     }
 
@@ -175,17 +176,17 @@ class NavigationTextTest {
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
             navigationDisplayFlow(frames, data, enabled).collect { received.add(it) }
         }
-        assertEquals("EXT1  ", received.last()?.eta)
+        assertEquals("EXIT1 ", received.last()?.eta)
         val second = parsed("At the roundabout, turn left").copy(traceId = "next")
         data.value = second
         assertEquals(1, received.size)
         frames.value = second.toNavFrame()
-        assertEquals(listOf("EXT1  ", "RB L  "), received.map { it?.eta })
+        assertEquals(listOf("EXIT1 ", "RBLFT "), received.map { it?.eta })
         val third = parsed("Make a U-turn").copy(traceId = "third")
         frames.value = third.toNavFrame()
         assertEquals(2, received.size)
         data.value = third
-        assertEquals("U-RGHT", received.last()?.eta)
+        assertEquals("UTRGT ", received.last()?.eta)
         enabled.value = false
         assertEquals("0101PM", received.last()?.eta)
         frames.value = null
@@ -211,7 +212,7 @@ class NavigationTextTest {
     @Test fun detailedToNormalTransitionRestoresCurrentArrivalTimeWithoutLeakingText() {
         val detailed = parsed("Make a right U-turn")
         val detailedFrame = detailed.toNavFrame()
-        assertEquals("U-RGHT", withNavigationText(detailedFrame, detailed, true)!!.eta)
+        assertEquals("UTRGT ", withNavigationText(detailedFrame, detailed, true)!!.eta)
         val normal = parsed("Turn right").copy(traceId = "next-input")
         val normalFrame = normal.toNavFrame().copy(eta = "0245PM")
         assertSame(normalFrame, withNavigationText(normalFrame, normal, true))
@@ -235,8 +236,8 @@ class NavigationTextTest {
         val data = parsed("Turn left")
         for ((state, label) in listOf(
             MapsNavigationState.STARTING to "START ",
-            MapsNavigationState.REROUTING to "REROUT",
-            MapsNavigationState.ARRIVED to "ARRIVE",
+            MapsNavigationState.REROUTING to "RERTE ",
+            MapsNavigationState.ARRIVED to "ARRVD ",
         )) assertEquals(label, navigationText(data.copy(navigationState = state)))
         for (state in listOf(MapsNavigationState.STARTING, MapsNavigationState.REROUTING, MapsNavigationState.ARRIVED)) {
             val lifecycle = data.copy(navigationState = state)
@@ -244,20 +245,20 @@ class NavigationTextTest {
         }
         assertEquals("ROUND ", navigationText(data.copy(roundaboutExit = 100)))
         val exitWithNormalArrow = data.copy(roundaboutExit = 3, maneuverId = 4)
-        assertEquals("EXT3  ", withNavigationText(exitWithNormalArrow.toNavFrame(), exitWithNormalArrow, true)!!.eta)
+        assertEquals("EXIT3 ", withNavigationText(exitWithNormalArrow.toNavFrame(), exitWithNormalArrow, true)!!.eta)
     }
 
     @Test fun namedCircleRetainsOrdinalWithoutGuessingExitAngleOrAffectingNormalExits() {
         val data = parsed("At Example Cir, take the 3rd exit onto Main Rd")
         assertEquals(45, data.maneuverId)
         assertEquals(3, data.roundaboutExit)
-        assertEquals("EXT3  ", navigationText(data))
+        assertEquals("EXIT3 ", navigationText(data))
         assertEquals(72, MapplsIdGuesser.fromTextOrNull("At Example Circle, take the second exit"))
         assertNull(MapplsIdGuesser.roundaboutExit("Take the 3rd exit onto Circle Road"))
         assertEquals(4, parsed("Turn right onto Circle Rd").maneuverId)
     }
 
-    @Test fun exitNowUsesOnlyBlankNextFieldAndKeepsKnownExitInFirstFourTimeBytes() {
+    @Test fun exitNowUsesOnlyBlankNextFieldAndKeepsKnownExitInFiveVisibleTimeBytes() {
         val profile = SuzukiProfile(SuzukiModel.ACCESS, null)
         for (ordinal in listOf(2, 3)) {
             for (distance in listOf(null, "50 m", "0 m")) {
@@ -268,7 +269,7 @@ class NavigationTextTest {
                 val original = data.toNavFrame()
                 assertSame(original, withNavigationText(original, data, false))
                 val rendered = withNavigationText(original, data, true)!!
-                assertEquals("EXT$ordinal  ", rendered.eta)
+                assertEquals("EXIT$ordinal ", rendered.eta)
                 assertEquals(if (distance == null) "NOW " else original.distNext, rendered.distNext)
                 assertEquals(if (distance == null) " " else original.distNextUnit, rendered.distNextUnit)
                 assertEquals(original.distTotal, rendered.distTotal)
@@ -276,7 +277,7 @@ class NavigationTextTest {
                 for (protocol in ClusterProtocol.entries) {
                     val wire = protocol.toWire(rendered.encode())
                     val decoded = protocol.decode(wire) as NavFrame
-                    assertEquals("EXT$ordinal", wire.copyOfRange(9, 13).toString(Charsets.US_ASCII))
+                    assertEquals("EXIT$ordinal", wire.copyOfRange(9, 14).toString(Charsets.US_ASCII))
                     assertEquals(rendered.eta, decoded.eta)
                     assertEquals(rendered.distNext, decoded.distNext)
                     assertEquals(rendered.distNextUnit, decoded.distNextUnit)

@@ -18,16 +18,13 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.mrwick.redline.ui.safety.SafetySection
 import dev.mrwick.redline.ui.safety.SafetyViewModel
-import dev.mrwick.redline.app.AppGraph
-import dev.mrwick.redline.nav.DisplayProbe
-import kotlinx.coroutines.launch
+import dev.mrwick.redline.notifications.TelephonyCallSource
 
 /**
  * Bike sub-screen: rider identity + bike pairing + safety section.
@@ -43,25 +40,6 @@ fun BikeSettingsScreen(
     val bikeMac by vm.bikeMac.collectAsStateWithLifecycle()
     val pairedSuzuki by vm.pairedSuzuki.collectAsStateWithLifecycle()
     val fuelCapacityL by vm.fuelCapacityL.collectAsStateWithLifecycle()
-    val instructionText by vm.experimentalInstructionText.collectAsStateWithLifecycle()
-    val textInEta by vm.navigationTextInEta.collectAsStateWithLifecycle()
-    val scope = rememberCoroutineScope()
-    var stationary by remember { mutableStateOf(false) }
-    var acceptFreshIdentity by remember { mutableStateOf(false) }
-    var testing by remember { mutableStateOf(false) }
-    var testResult by remember { mutableStateOf<String?>(null) }
-    val runProbe: (DisplayProbe) -> Unit = { probe ->
-        testing = true
-        testResult = "Testing: ${probe.label}"
-        scope.launch {
-            try {
-                testResult = AppGraph.testDisplay(probe, riderName, instructionText && !textInEta)
-            } finally {
-                testing = false
-            }
-        }
-    }
-
     LazyColumn(
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
@@ -140,138 +118,69 @@ fun BikeSettingsScreen(
             }
         }
         item {
-            SettingsSection("Experimental cluster instructions") {
-                Text("Smart arrival time / instruction text")
+            SettingsSection("Cluster navigation text") {
                 Text("Keeps arrival time for normal left, right and straight guidance, and when no action is known. " +
                     "For U-turns, roundabouts, slight/sharp turns, keep/join/ramp and headings " +
-                    "guidance, short text replaces arrival time. Starting, rerouting and arrival also show text. " +
-                    "Roundabouts show EXT2/EXT3 (count exits from entry), or RB L/RB R for explicit left/right guidance. " +
+                    "guidance, short text replaces arrival time. Starting also shows text; rerouting and arrival show " +
+                    "the cluster's own RE-ROUTING and DESTINATION REACHED messages. " +
+                    "Roundabouts show EXIT2/EXIT3 (count exits from entry), or RBLFT/RBRGT for explicit left/right guidance. " +
                     "When Maps says to exit now without a next distance, NOW replaces only the blank next-distance field. " +
                     "The last fresh roundabout exit number stays in the time field; EXIT means no number is known. " +
                     "No exit angle is guessed. " +
                     "MERGE means join the named road with no side supplied; no left/right arrow is invented. " +
-                    "MERG L/MERG R and directional arrows require a supplied left/right direction. " +
-                    "U-LEFT/U-RGHT show U-turn sides; unspecified U-turns default to right. " +
-                    "Text uses the six transmitted time bytes; cluster separators and suffixes may remain. " +
+                    "MGLFT/MGRGT and directional arrows require a supplied left/right direction. " +
+                    "UTLFT/UTRGT show U-turn sides; unspecified U-turns default to right. " +
+                    "The time field shows five letters split by the clock bar (KP|LFT = keep left, " +
+                    "HD = sharp, SL = slight, RP = ramp, RB = roundabout, UT = U-turn). " +
                     "Arrow and total distance stay unchanged; supplied next distances are never replaced. " +
                     "After 30 seconds without Maps updates, STALE replaces guidance and clears the arrow " +
-                    "and distances, even with smart text off. New input resumes guidance; stopping Maps " +
+                    "and distances. New input resumes guidance; stopping Maps " +
                     "resumes idle. The separate ETA label is not changed.")
-                androidx.compose.material3.Switch(
-                    checked = textInEta,
-                    onCheckedChange = vm::setNavigationTextInEta,
-                    enabled = !testing,
-                )
-                Text("Legacy rider-name banner experiment")
-                Text("Reuses the rider-name connection message for short instructions (20 ASCII characters). " +
-                    "Disabled while navigation text in time field is enabled. Not verified to refresh the banner.")
-                androidx.compose.material3.Switch(
-                    checked = instructionText,
-                    onCheckedChange = vm::setExperimentalInstructionText,
-                    enabled = !testing && !textInEta,
-                )
-                Text("Letters in the time and both distance fields were reported visible on the Access. " +
-                    "The rider-name banner remains unverified. " +
-                    "Stop Maps navigation before testing. Each test holds automatic idle display updates " +
-                    "for up to 8 seconds; heartbeat stays active. Navigation input cancels the hold.")
-                Text("I am stationary and will remain stationary during the test")
-                androidx.compose.material3.Checkbox(
-                    checked = stationary,
-                    onCheckedChange = { stationary = it },
-                    enabled = !testing,
-                )
-                DisplayProbe.entries.filterNot {
-                    it.investigatesEtaLabel || it.testsIdentity || it.testsArrivalTime
-                }.forEach { probe ->
-                    OutlinedButton(
-                        enabled = stationary && !testing,
-                        onClick = { runProbe(probe) },
-                    ) { Text(probe.label) }
-                }
-                testResult?.let { Text(it) }
             }
         }
         item {
-            SettingsSection("Arrival time stationary test") {
-                Text("Tests the numeric arrival-time field, not the separate ETA label. " +
-                    "AM and PM tests keep next distance at 123 m and total distance at 45 km. " +
-                    "No Maps route is needed and the smart-text setting does not affect these tests. " +
-                    "Each test pauses automatic display updates for up to 8 seconds; heartbeat stays active.")
-                Text("I am stationary and have stopped Maps navigation")
-                androidx.compose.material3.Checkbox(
-                    checked = stationary,
-                    onCheckedChange = { stationary = it },
-                    enabled = !testing,
-                )
-                DisplayProbe.entries.filter { it.testsArrivalTime }.forEach { probe ->
-                    OutlinedButton(
-                        enabled = stationary && !testing,
-                        onClick = { runProbe(probe) },
-                    ) { Text(probe.label) }
-                }
-                testResult?.let { Text(it) }
-            }
+            SpeedWarningSection(vm)
         }
         item {
-            SettingsSection("Rider-name banner investigation") {
-                Text("Uses your saved rider name (up to 20 ASCII bytes). Run R first, then F, " +
-                    "and photograph whether the name or connected banner appears. " +
-                    "R is the reconnect identity message; F is the fresh-connection variant. " +
-                    "Hypothesis: F may retrigger the banner. Its effect while already connected " +
-                    "is unverified and it may affect the connection. These tests do not change " +
-                    "the normal connection handshake or enable instruction banners.")
-                Text("Automatic navigation/idle updates pause for up to 8 seconds; heartbeat stays active. " +
-                    "The saved name is resent with R afterward; restoration is not a rendering acknowledgement. " +
-                    "If the link drops or restoration fails, reconnect. Export Diagnostics after testing.")
-                Text("I am stationary and have stopped Maps navigation")
-                androidx.compose.material3.Checkbox(
-                    checked = stationary,
-                    onCheckedChange = { stationary = it },
-                    enabled = !testing,
-                )
-                Text("Enable experimental F test: it may affect the connection")
-                androidx.compose.material3.Checkbox(
-                    checked = acceptFreshIdentity,
-                    onCheckedChange = { acceptFreshIdentity = it },
-                    enabled = !testing,
-                )
-                DisplayProbe.entries.filter { it.testsIdentity }.forEach { probe ->
-                    OutlinedButton(
-                        enabled = stationary && !testing &&
-                            (probe != DisplayProbe.IDENTITY_FRESH || acceptFreshIdentity),
-                        onClick = { runProbe(probe) },
-                    ) { Text(probe.label) }
-                }
-                testResult?.let { Text(it) }
-            }
+            RideAlertsSection(vm)
         }
         item {
-            SettingsSection("ETA label investigation") {
-                Text("Investigates the separate ETA label visible in navigation mode, not the six-character time field.")
-                Text("No writable offset for this label is known. Hypothesis: the three unassigned " +
-                    "bytes immediately after the time field might control it. The ABC test changes " +
-                    "only those bytes and the checksum; it may do nothing or affect another area.")
-                Text("Stop Maps navigation and remain stationary. Run baseline first, then ABC. " +
-                    "Each test lasts up to 8 seconds; automatic display updates pause, heartbeat stays active. " +
-                    "Photograph both results, noting whether ETA changes, disappears or stays the same, " +
-                    "and whether ABC appears anywhere else. Export Diagnostics afterward.")
-                Text("I am stationary and will remain stationary during the test")
-                androidx.compose.material3.Checkbox(
-                    checked = stationary,
-                    onCheckedChange = { stationary = it },
-                    enabled = !testing,
-                )
-                DisplayProbe.entries.filter { it.investigatesEtaLabel }.forEach { probe ->
-                    OutlinedButton(
-                        enabled = stationary && !testing,
-                        onClick = { runProbe(probe) },
-                    ) { Text(probe.label) }
-                }
-                testResult?.let { Text(it) }
-            }
+            CallAlertPermissionsSection()
+        }
+        item {
+            AutoReplySection(vm)
         }
         item {
             SafetySection(safetyVm)
+        }
+    }
+}
+
+@Composable
+private fun CallAlertPermissionsSection() {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    var tick by remember { mutableStateOf(0) }
+    val launcher = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions(),
+    ) { tick++ }
+    val labels = listOf("Phone calls", "Call logs (number)", "Contacts (name)")
+    val granted = remember(tick) {
+        TelephonyCallSource.PERMISSIONS.map {
+            androidx.core.content.ContextCompat.checkSelfPermission(ctx, it) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+        }
+    }
+    SettingsSection("SIM call alerts") {
+        Text("Shows incoming SIM calls on the cluster with the caller's name or number until you " +
+            "answer, decline or miss the call. Unanswered calls are sent as missed calls.")
+        labels.zip(granted).forEach { (label, ok) ->
+            Text("$label: ${if (ok) "granted" else "not granted"}")
+        }
+        if (!granted.all { it }) {
+            Button(
+                onClick = { launcher.launch(TelephonyCallSource.PERMISSIONS) },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Grant call permissions") }
         }
     }
 }

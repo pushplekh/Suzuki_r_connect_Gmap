@@ -18,20 +18,6 @@ import java.io.File
 class SuzukiSettingsTest {
     @get:Rule val temporaryFolder = TemporaryFolder()
 
-    @Test fun navigationFieldTextIsExplicitOptInAndSurvivesReopen() = runTest {
-        val file = File(temporaryFolder.root, "navigation.preferences_pb")
-        withSettings(file) { settings ->
-            assertEquals(false, settings.navigationTextInEta.first())
-            settings.setExperimentalInstructionText(true)
-            assertEquals(false, settings.navigationTextInEta.first())
-            settings.setNavigationTextInEta(true)
-        }
-        withSettings(file) { settings ->
-            assertEquals(true, settings.navigationTextInEta.first())
-            settings.setNavigationTextInEta(false)
-            assertEquals(false, settings.navigationTextInEta.first())
-        }
-    }
     @Test fun selectionSurvivesDataStoreReopen() = runTest {
         val file = File(temporaryFolder.root, "profile.preferences_pb")
         withSettings(file) { settings ->

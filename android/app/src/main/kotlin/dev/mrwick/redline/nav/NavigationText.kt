@@ -7,39 +7,43 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.transform
 import kotlinx.coroutines.flow.flowOf
 
-/** Static six-character instructions; never reinterpret an exit ordinal as an angle. */
+/**
+ * Static instructions for the time field, drawn as five cells `c0 c1 | c2 c3 c4` with a
+ * fixed bar; the sixth byte is not displayed. Labels are at most five characters, split
+ * around the bar. Never reinterpret an exit ordinal as an angle.
+ */
 internal fun navigationText(parsed: ParsedNavData): String {
     val label = when (parsed.navigationState) {
         MapsNavigationState.STARTING -> "START"
-        MapsNavigationState.REROUTING -> "REROUT"
-        MapsNavigationState.ARRIVED -> "ARRIVE"
+        MapsNavigationState.REROUTING -> "RERTE"
+        MapsNavigationState.ARRIVED -> "ARRVD"
         MapsNavigationState.NAVIGATING -> when {
             parsed.roundaboutExit != null -> {
-                val exit = "EXT${parsed.roundaboutExit}"
-                if (exit.length <= 4) exit else "ROUND"
+                val exit = "EXIT${parsed.roundaboutExit}"
+                if (exit.length <= MAX_LABEL) exit else "ROUND"
             }
             MapplsIdGuesser.isRoundaboutExit(parsed.streetName) -> "EXIT"
             else -> when (parsed.maneuverId) {
                 1, 13 -> "LEFT"
                 4, 14 -> "RIGHT"
-                2, 29 -> "HARD L"
-                5, 30 -> "HARD R"
-                3 -> "SL-L"
-                6 -> "SL-R"
+                2, 29 -> "HDLFT"
+                5, 30 -> "HDRGT"
+                3 -> "SLLFT"
+                6 -> "SLRGT"
                 7, 34 -> {
                     val instruction = parsed.streetName.orEmpty().lowercase(Locale.ROOT)
                         .replace(Regex("[\u2010-\u2014]"), "-")
                     if (Regex("""\b(?:left u[- ]turn|u[- ]turn left)\b""").containsMatchIn(instruction)) {
-                        "U-LEFT"
-                    } else "U-TURN"
+                        "UTLFT"
+                    } else "UTURN"
                 }
-                36, 39 -> "U-RGHT"
-                11, 27 -> "KEEP L"
-                12, 28 -> "KEEP R"
-                31 -> "MERG L"
-                32 -> "MERG R"
-                38 -> "RAMP L"
-                10 -> "RAMP R"
+                36, 39 -> "UTRGT"
+                11, 27 -> "KPLFT"
+                12, 28 -> "KPRGT"
+                31 -> "MGLFT"
+                32 -> "MGRGT"
+                38 -> "RPLFT"
+                10 -> "RPRGT"
                 8, 33 -> "AHEAD"
                 40 -> "NORTH"
                 41 -> "NE"
@@ -57,14 +61,17 @@ internal fun navigationText(parsed: ParsedNavData): String {
                     when {
                         MapplsIdGuesser.isUndirectedJoin(parsed.streetName) -> "MERGE"
                         Regex("""^(?:head|proceed)\s+towards?\b""").containsMatchIn(text) -> "HEAD"
-                        else -> "NO DIR"
+                        else -> NO_DIRECTION
                     }
                 }
             }
         }
     }
-    return label.padEnd(6, ' ')
+    return label.take(MAX_LABEL).padEnd(6, ' ')
 }
+
+private const val MAX_LABEL = 5
+private const val NO_DIRECTION = "NODIR"
 
 internal fun withNavigationText(frame: NavFrame?, parsed: ParsedNavData?, enabled: Boolean): NavFrame? {
     if (!enabled || frame == null || parsed == null || frame.traceId == null ||
@@ -74,7 +81,7 @@ internal fun withNavigationText(frame: NavFrame?, parsed: ParsedNavData?, enable
         parsed.roundaboutExit == null && parsed.maneuverId in setOf(1, 4, 8, 13, 14, 33)
     ) return frame
     val text = navigationText(parsed)
-    if (text == "NO DIR") return frame
+    if (text.trimEnd() == NO_DIRECTION) return frame
     val exitNow = parsed.navigationState == MapsNavigationState.NAVIGATING &&
         MapplsIdGuesser.isRoundaboutExit(parsed.streetName) &&
         !parsed.nextDistanceKnown && frame.distNext.isBlank()

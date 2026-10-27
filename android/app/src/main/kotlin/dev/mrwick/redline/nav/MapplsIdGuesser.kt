@@ -98,9 +98,9 @@ object MapplsIdGuesser {
         val clause = instruction?.let(::instructionClause) ?: return null
         if (!isRoundaboutInstruction(clause)) return null
         return when {
-            Regex("""\b(?:turn|bear|keep)\s+left\b""").containsMatchIn(clause) -> "RB L"
-            Regex("""\b(?:turn|bear|keep)\s+right\b""").containsMatchIn(clause) -> "RB R"
-            Regex("""\b(?:go straight|continue straight|straight ahead)\b""").containsMatchIn(clause) -> "RB FWD"
+            Regex("""\b(?:turn|bear|keep)\s+left\b""").containsMatchIn(clause) -> "RBLFT"
+            Regex("""\b(?:turn|bear|keep)\s+right\b""").containsMatchIn(clause) -> "RBRGT"
+            Regex("""\b(?:go straight|continue straight|straight ahead)\b""").containsMatchIn(clause) -> "RBFWD"
             else -> null
         }
     }

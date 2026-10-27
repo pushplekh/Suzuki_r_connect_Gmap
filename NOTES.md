@@ -2,9 +2,18 @@
 
 ## Android build identity and credits (2026-10-26)
 
-Current persisted version: **0.1.11 / code 12**.
+Current persisted version: **0.1.17 / code 18**.
 Maintain appVersionName/appVersionCode in android/gradle.properties and increment
-the code for each distributed update. Code 10 was 0.1.9-call-alerts.
+the code for each distributed update. Code 10 was 0.1.9-call-alerts. Code 13 added
+ringing-call refresh and call display probes; code 14 moves the ETA label probes to a532.
+Code 15 adds SIM call detection from PHONE_STATE broadcasts. Code 16 fits navigation
+labels to the five visible time-field cells and adds time-field separator probes.
+Code 17 stops sending status `2` while navigation is STARTING and replaces the
+separator probes with built-in status-message probes (statuses 0, 3, 4, 6).
+Code 18 removes all on-bike display tests (DisplayProbe) from Bike settings, makes the
+smart time-field navigation text permanent (no switch) and removes the unverified
+rider-name banner instruction experiment. Call alerts (SIM and WhatsApp) are always on;
+they need the call permissions from onboarding or Bike settings → SIM call alerts.
 
 The application name remains REDLINE; maintainer names are not version labels.
 About identifies Pushplekh as this build's maintainer only in Credits. The card retains
@@ -18,6 +27,128 @@ Public release signing is configured through four REDLINE_* environment
 variables documented in README. No signing key is generated or committed.
 Without those variables assembleRelease builds an unsigned artifact only.
 Code 11's maintainer-labelled version is superseded by the plain version above.
+
+## Incoming-call display on the cluster (2026-10-27)
+
+Observed (diagnostics9, 0.1.9 code 10, LEGACY_ACCESS_BURGMAN protocol, WhatsApp call):
+- Redline wrote a532 `Priya`, source `W`, state `1` three times (17:38:15.264-.670),
+  then nothing until state `2` at 17:38:49 (answered). a531 nav and a533 heartbeat
+  kept writing every second during the ring.
+- Rider report: LED flashed, the ETA area showed call-like content, the time field
+  showed the caller name, and all of it stopped after about 1-3 s while still ringing.
+  The exact ETA-area content was not recorded.
+
+OEM 7.6 static evidence: `CallReceiverBroadcast.onReceive` and
+`NotificationService.r` send one three-frame burst per call-state change. The 1 s
+`com.suzuki.activity.v0` timer started there only polls missed-call read state for
+the a533 clear flag. No ringing resend was found in those paths.
+
+Unknown: whether the cluster times out the call display or a531 replaces it.
+Code 13 does both: resends ringing a532 every 1 s and holds a531 writes while
+ringing (bounded at 90 s; heartbeat continues). The cadence is a design choice to
+verify. Bike settings → Call display test separates the causes (A: one burst with
+nav held; B-D: 1 s refresh, phone type, 20 letters).
+
+ETA-area characters: rider reports (2026-10-27) the ETA label showed `Call` during
+the real call and that the earlier ETA label ABC test (a531 bytes 15-17) did not
+change it; that run is not in exported diagnostics1-9. No a532 byte contains `Call`.
+Inference: the cluster draws the label from the frame type. Code 14 replaces the
+ABC test with a532 variants: normal phone call (control), `ABCD` in bytes 24-27,
+source byte `X`, answered state `2`, state byte `X`. Each resends every second for
+8 s. Only a changed label in one of them would show a writable label.
+
+Code 14 results (diagnostics10 + photos, 2026-10-27, all probe writes locally successful):
+- Source `W` → the label area shows `W-CALL`; source `N` → `CALLER`. The caller text
+  appears on the line below (normally the ETA/time field) with no separator.
+  `ABCDEFGHIJKL` (12 of 20 letters) is visible in the 20-letter photo.
+  The rider reports seeing about 15, so the exact limit is not yet established.
+- Source `X` flashed the LED (label text not recorded). State `2` and state `X` showed
+  nothing, per the rider. The `ABCD` in bytes 24-27 result was not reported.
+- A `2` appears left of the label during the call display (meaning unknown).
+- Conclusion: the label is selected by the cluster from byte 22. No caller-writable
+  label was found in a532.
+- Normal a531 ETA/time shows a fixed separator between characters 2 and 3
+  (e.g. `06:24PM`). Hypothesis: the cluster draws it. No a531 byte is known to
+  remove it, and the separator-free a532 line always comes with the LED and call label.
+
+SIM call detection (diagnostics10): the rider received a normal SIM call at about 18:30
+while the link was Ready (`SCREEN_ON` 18:30:18). The log contains no CallAlerts line.
+Phone-package notifications not recognized as calls were dropped without a log,
+and no SIM call has appeared in any diagnostics1-10. The OEM app uses
+`CallReceiverBroadcast` (PHONE_STATE, `incoming_number`) instead.
+Code 15 adds the same source (`TelephonyCallSource`):
+- RINGING → a532 `N` state `1`, with the contact name (READ_CONTACTS), else the number
+  (READ_CALL_LOG), else `UNKNOWN`.
+- OFFHOOK → state `2`.
+- IDLE after RINGING → a534 missed call, with a count. Cleared when the phone's
+  missed-call notification is dismissed.
+- Dialer notifications defer to it, and unrecognized call notifications are now logged.
+
+## Time-field rendering (a531 bytes 9-14, 2026-10-27)
+
+Observed (22 Oct probe photos, cluster clock 12:30-12:36 AM; no matching app log,
+since diagnostics6 ends 10-21 22:27 and diagnostics7 starts 10-22 10:47; plus the
+27 Oct `06|24Pm` photo):
+- Five cells are drawn as `c0 c1 | c2 c3 c4`, followed by a fixed `m`. Byte 14 is not
+  drawn. `ABCDEF` → `AB|CDE`, `GUIDE` → `GU|IDE`, `RIGHT` → `RI|GHT`, `SE` → `SE|`.
+- The bar is cell 2 of a 14-segment row lit as the clock colon (centre-vertical segments).
+  It is lit in time mode even when the field is blank; in `DESTINATION REACHED` the same
+  cell shows `A`, and in `RE-ROUTING` it shows `-` (drawn as `--`, two half-segments).
+- Six-character labels lost their last letter (e.g. `KEEP L` → `KE|EP`, `EXIT 2` → `EX|IT`).
+
+Code 16: labels are at most five characters and use the bar as a split:
+`KPLFT`/`KPRGT`, `HDLFT`/`HDRGT`, `SLLFT`/`SLRGT`, `MGLFT`/`MGRGT`,
+`RPLFT`/`RPRGT`, `UTURN`/`UTLFT`/`UTRGT`, `RBLFT`/`RBRGT`/`RBFWD`, `EXIT2`, `RERTE`,
+`ARRVD`. Others are unchanged. Unverified on the bike.
+
+The separator-free caller line belongs to the a532 call display, which always flashes
+the LED and shows the call label. No a531 byte is known to remove the bar.
+Code 16 adds Bike settings → Time-field separator test (`ABCDE`, 8 s each):
+control; byte 14 NUL; bytes 15-17 `000`; status byte 23 `2`, `3`, `5`.
+To verify: whether any variant changes the bar, letters or trailing `m`.
+Result (diagnostics11 plus 27 Oct photos): the control `AB|CDEm` photo still shows
+the bar. Status `2` and `5` replaced the field with built-in messages (below). The
+NUL, `000` and status `3` runs have no photo or report.
+
+### Status byte 23 built-in messages (photo-verified 2026-10-27)
+
+- `2` (TX 20:47:13) → full-width `RE-ROUTING` plus a `!` icon.
+- `5` (TX 20:47:53, 20:48:02) → full-width `DESTINATION REACHED` over two lines plus
+  a destination icon.
+- Both frames carried `ABCDE` in bytes 9-14 and the cluster hid it, so the message
+  text is fixed in the cluster; the phone only selects it. No bar is drawn.
+- Statuses 0, 3, 4 and 6 are untested on the cluster. Code 17 adds Bike settings →
+  Cluster built-in message test (`ABCDE` control at status 1, then 0, 3, 4, 6).
+- Bug fixed in code 17: STARTING used status `2`, so the cluster probably showed
+  RE-ROUTING at each navigation start (not photo-verified). STARTING now sends `1`.
+
+## Cluster speed-exceeding warning (2026-10-26)
+
+OEM 7.6: a533 bytes 4-6 carry the configured speed-warning threshold as `%03d`
+(range 10-299 for motorcycles, preference `vehicle_data`/`speed`), or `FF FF FF`
+when disabled. Inference: the cluster compares speed with that threshold and draws
+its own warning; the OEM sends only three digits, so the warning text is not a
+phone-supplied text channel. Until code 18 Redline sent `FF FF FF`; the occasional
+warning seen on those rides remains unexplained.
+
+Code 19 (0.1.18): Bike settings → Speed warning sends the limit as `%03d` (5-120 km/h,
+the OEM scooter range from `T0.onCreateView`, REA `ev_6ff2fd42…`; e-ACCESS max is 80
+there) or `FF FF FF` when off. To verify on the Access: set 20 km/h and ride above it.
+
+## OEM Access ride features ported in code 19 (2026-10-27)
+
+Source: REA static analysis of OEM 7.6 (`suzuki-7.6-base.apk`). Not yet verified on the bike.
+
+| Feature | OEM evidence | Redline behaviour | Design choices (not OEM) |
+|---|---|---|---|
+| Calendar/meeting alert | `NotificationService.i` (`ev_943e2f06…`): message frame type `X` (0x58); `NotificationService.k`: 5 s per-package and per-id dedup, then 1 s delay | Calendar app notifications send three `X` frames 200 ms apart after 1 s; skipped during a call | Meeting apps (Teams, Meet, Zoom…) trigger only for category event/reminder/call; OEM triggers on any of their notifications |
+| Auto-reply SMS | call handler `f` (`ev_0c5af59d…`): reject call, then SMS | Default: SMS only after a missed call (RINGING → IDLE without OFFHOOK), once per call. Optional toggle rejects via `TelecomManager.endCall()` and texts at once | Only while the bike is connected; call waiting not handled; `endCall()` is deprecated since API 29 and untested |
+| Rain alert in navigation | `r0` (`ev_90489139…`): rain keywords → maneuver `57`, `L()` runs 10 ticks; maneuver byte only applies for status 1/3/5 (`B0.D`, `ev_a7465045…`) | Even ticks of a 10-tick window substitute maneuver 57 at the start of each nav session and when weather turns rainy | Rainy = Suzuki weather codes 4, 5, 6, 8; OEM also includes cloudy. OEM trigger cadence not traced |
+| Voice alerts | `onClusterDataRecev` (`ev_0c0dfcdd…`): TTS "Low Fuel Level" when byte 24 is not `1`-`6`; e-ACCESS "Low Battery Level" when `(b24 − 64) < 26`; preference default on | TTS for low fuel/battery, plus connect/disconnect | Connect/disconnect speech is a Redline addition (not traced in OEM); low-level alert once per connection; where OEM resets its once-flag is unknown |
+
+Observed: across every log in `C:\Dev\logs`, the Access reports byte 24 = `1` or `2`
+(fuelBars never null), so the low-fuel alert should not trigger falsely at those levels.
+Unverified: how the cluster renders the `X` frame and maneuver 57 on the Access.
 
 > Living spec for the BLE protocol between the Suzuki Connect Android app and the Suzuki Gixxer SF 150 (2023). Grown milestone-by-milestone.
 

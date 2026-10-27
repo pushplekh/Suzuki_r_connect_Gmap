@@ -91,8 +91,9 @@ internal data class MapsNotificationContent(
             distTotalUnit = total.second,
             streetName = instruction,
             status = when {
+                // Cluster built-in messages: 5 = DESTINATION REACHED, 2 = RE-ROUTING.
                 arrived -> "5"
-                !active -> "2"
+                state == MapsNavigationState.REROUTING -> "2"
                 else -> "1"
             },
             navigationState = state,

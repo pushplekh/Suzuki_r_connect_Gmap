@@ -36,20 +36,6 @@ class Settings internal constructor(private val ds: DataStore<Preferences>) {
     val bikeMac: Flow<String?> =
         ds.data.map { decodeNullableString(it[Keys.BIKE_MAC]) }
 
-    val experimentalInstructionText: Flow<Boolean> =
-        ds.data.map { it[booleanPreferencesKey("experimental_instruction_text")] ?: false }
-
-    val navigationTextInEta: Flow<Boolean> =
-        ds.data.map { it[booleanPreferencesKey("navigation_text_in_eta")] ?: false }
-
-    suspend fun setNavigationTextInEta(enabled: Boolean) {
-        ds.edit { it[booleanPreferencesKey("navigation_text_in_eta")] = enabled }
-    }
-
-    suspend fun setExperimentalInstructionText(enabled: Boolean) {
-        ds.edit { it[booleanPreferencesKey("experimental_instruction_text")] = enabled }
-    }
-
     val pairedBike: Flow<Pair<String?, String?>> = ds.data.map {
         decodeNullableString(it[Keys.BIKE_MAC]) to decodeNullableString(it[Keys.BIKE_NAME])
     }
@@ -102,6 +88,29 @@ class Settings internal constructor(private val ds: DataStore<Preferences>) {
     /** When true, the phone enables Do-Not-Disturb on bike connect. Off by default. */
     val autoDndOnConnect: Flow<Boolean> =
         ds.data.map { it[Keys.AUTO_DND_ON_CONNECT] ?: false }
+
+    /** Cluster speed-warning threshold in km/h; 0 means off. */
+    val speedLimitKmh: Flow<Int> =
+        ds.data.map { it[Keys.SPEED_LIMIT_KMH] ?: 0 }
+
+    val calendarAlerts: Flow<Boolean> =
+        ds.data.map { it[Keys.CALENDAR_ALERTS] ?: false }
+
+    val autoReplyEnabled: Flow<Boolean> =
+        ds.data.map { it[Keys.AUTO_REPLY_ENABLED] ?: false }
+
+    val autoReplyMessage: Flow<String> =
+        ds.data.map { it[Keys.AUTO_REPLY_MESSAGE] ?: DEFAULT_AUTO_REPLY_MESSAGE }
+
+    /** Reject the ringing call before sending the auto-reply, as Ride Connect does. */
+    val autoReplyRejectCall: Flow<Boolean> =
+        ds.data.map { it[Keys.AUTO_REPLY_REJECT_CALL] ?: false }
+
+    val rainAlertNav: Flow<Boolean> =
+        ds.data.map { it[Keys.RAIN_ALERT_NAV] ?: false }
+
+    val voiceAlerts: Flow<Boolean> =
+        ds.data.map { it[Keys.VOICE_ALERTS] ?: true }
 
     /**
      * Legacy single-service interval in km; defaults to 5000.
@@ -303,6 +312,34 @@ class Settings internal constructor(private val ds: DataStore<Preferences>) {
         ds.edit { it[Keys.AUTO_DND_ON_CONNECT] = v }
     }
 
+    suspend fun setSpeedLimitKmh(v: Int) {
+        ds.edit { it[Keys.SPEED_LIMIT_KMH] = if (v <= 0) 0 else v.coerceIn(MIN_SPEED_LIMIT_KMH, MAX_SPEED_LIMIT_KMH) }
+    }
+
+    suspend fun setCalendarAlerts(v: Boolean) {
+        ds.edit { it[Keys.CALENDAR_ALERTS] = v }
+    }
+
+    suspend fun setAutoReplyEnabled(v: Boolean) {
+        ds.edit { it[Keys.AUTO_REPLY_ENABLED] = v }
+    }
+
+    suspend fun setAutoReplyMessage(v: String) {
+        ds.edit { it[Keys.AUTO_REPLY_MESSAGE] = v.take(MAX_AUTO_REPLY_CHARS) }
+    }
+
+    suspend fun setAutoReplyRejectCall(v: Boolean) {
+        ds.edit { it[Keys.AUTO_REPLY_REJECT_CALL] = v }
+    }
+
+    suspend fun setRainAlertNav(v: Boolean) {
+        ds.edit { it[Keys.RAIN_ALERT_NAV] = v }
+    }
+
+    suspend fun setVoiceAlerts(v: Boolean) {
+        ds.edit { it[Keys.VOICE_ALERTS] = v }
+    }
+
     /** Set the service interval (km between scheduled services). */
     suspend fun setServiceIntervalKm(v: Int) {
         ds.edit { it[Keys.SERVICE_INTERVAL_KM] = v }
@@ -459,6 +496,13 @@ class Settings internal constructor(private val ds: DataStore<Preferences>) {
         val NOW_PLAYING_ON_CLUSTER = booleanPreferencesKey("now_playing_on_cluster")
         val RANGE_ON_CLUSTER = booleanPreferencesKey("range_on_cluster")
         val AUTO_DND_ON_CONNECT = booleanPreferencesKey("auto_dnd_on_connect")
+        val SPEED_LIMIT_KMH = intPreferencesKey("speed_limit_kmh")
+        val CALENDAR_ALERTS = booleanPreferencesKey("calendar_alerts")
+        val AUTO_REPLY_ENABLED = booleanPreferencesKey("auto_reply_enabled")
+        val AUTO_REPLY_MESSAGE = stringPreferencesKey("auto_reply_message")
+        val AUTO_REPLY_REJECT_CALL = booleanPreferencesKey("auto_reply_reject_call")
+        val RAIN_ALERT_NAV = booleanPreferencesKey("rain_alert_nav")
+        val VOICE_ALERTS = booleanPreferencesKey("voice_alerts")
         val SERVICE_INTERVAL_KM = intPreferencesKey("service_interval_km")
         val LAST_SERVICE_ODO_KM = intPreferencesKey("last_service_odo_km")
         val MIRROR_ALLOWLIST = stringSetPreferencesKey("mirror_allowlist")
@@ -528,6 +572,15 @@ class Settings internal constructor(private val ds: DataStore<Preferences>) {
         const val DEFAULT_JOURNEY_GAP_MAX_MIN: Int = 120
         const val DEFAULT_JOURNEY_MIN_SEGMENTS: Int = 3
         const val DEFAULT_JOURNEY_MIN_TOTAL_KM: Int = 80
+
+        /** Ride Connect 7.6 scooter speed-warning range (T0.onCreateView). */
+        const val MIN_SPEED_LIMIT_KMH: Int = 5
+        const val MAX_SPEED_LIMIT_KMH: Int = 120
+        const val DEFAULT_SPEED_LIMIT_KMH: Int = 60
+
+        const val DEFAULT_AUTO_REPLY_MESSAGE: String = "I'm Riding"
+        const val MAX_AUTO_REPLY_CHARS: Int = 150
+        val AUTO_REPLY_PRESETS: List<String> = listOf("I'm Riding", "I'm Busy", "I'll Call You Later")
 
         /**
          * Default package allowlist for notification mirroring.

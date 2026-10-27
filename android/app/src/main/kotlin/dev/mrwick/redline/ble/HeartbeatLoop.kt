@@ -14,6 +14,7 @@ class HeartbeatLoop(
     private val smsPendingProvider: () -> Boolean,
     private val callPendingProvider: () -> Boolean, // Legacy name: true emits Y (OEM call-cleared flag).
     private val weatherProvider: () -> Pair<Int, Int>,          // (suzukiCode, tempByte)
+    private val speedLimitProvider: () -> Int = { 0 },          // km/h; 0 disables the cluster warning
     private val clock: () -> LocalTime = { LocalTime.now() },
 ) {
     /**
@@ -47,7 +48,7 @@ class HeartbeatLoop(
         return HeartbeatFrame(
             batteryBucket = bucket,
             charging = if (charging) "Y" else "N",
-            speedStr = "",   // OEM speed-warning limit: empty encodes its disabled state (FF FF FF).
+            speedStr = speedLimitString(speedLimitProvider()),
             signalStatus = sigBars,
             timeHhmmss = time,
             smsPending = if (smsPendingProvider()) "Y" else "N",
@@ -60,5 +61,9 @@ class HeartbeatLoop(
 
     companion object {
         const val HEARTBEAT_INTERVAL_MS: Long = 1_000L
+
+        /** OEM `%03d` threshold, or empty (FF FF FF) when disabled. */
+        fun speedLimitString(kmh: Int): String =
+            if (kmh <= 0) "" else "%03d".format(kmh.coerceAtMost(999))
     }
 }
